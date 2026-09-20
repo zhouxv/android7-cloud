@@ -1,0 +1,7 @@
+# 忽略根目录下所有文件和目录
+/*
+
+# 取消忽略要上传的
+!/.gitignore
+!/install-apk.sh
+!/android7.sh
