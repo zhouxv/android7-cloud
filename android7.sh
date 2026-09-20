@@ -935,9 +935,9 @@ tag.display=Default
 hw.keyboard=yes
 hw.mainKeys=no
 
-hw.lcd.width=1080
-hw.lcd.height=1920
-hw.lcd.density=420
+hw.lcd.width=720
+hw.lcd.height=1280
+hw.lcd.density=320
 
 hw.camera.back=none
 hw.camera.front=none
