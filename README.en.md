@@ -65,6 +65,7 @@ Modes have separate containers/data but both use port 8000 by default. Stop the 
 | `image stop` | Stop both containers; retain data |
 | `image restart` | Restart both containers |
 | `image down` | Remove both containers/network; retain both volumes |
+| `image reset` | After YES, reset Android and restart both containers; retain web accounts/passwords |
 | `image purge` | After YES, remove both containers and delete both volumes; do not restart |
 | `image log` / `image status` | Logs / status of both services |
 | `dev start` | Prepare sources, build and start two development containers |
@@ -80,6 +81,8 @@ Custom deployments require both image references:
 ```
 
 Deployment uses image tags only, without pinning release-image SHA256 digests. Selected tags are saved in `.android7-image.env`; subsequent argument-free starts reuse them. To update, pull the new pair and explicitly pass both references to `image start`. Compose recreates affected containers while retaining volumes.
+
+`image reset` deletes only `avd/` and `android.ready` inside the Android volume, clearing games, app data and Android accounts/settings while retaining web accounts/passwords and the selected images. After confirmation it stops both services, clears that state and starts them again, without building or publishing images.
 
 `purge` permanently deletes games, app files, accounts, settings, logs and web passwords for the selected mode. Images, source and build/download caches remain. Any answer other than YES, or end-of-input, cancels. References from other containers block data removal. The next start creates a fresh phone and requires a new administrator password.
 

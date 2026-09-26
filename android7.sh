@@ -2562,6 +2562,54 @@ cmd_image_start()
     echo "Web: http://127.0.0.1:8000"
 }
 
+# Reset only Android AVD state; keep web credentials and the selected image pair.
+cmd_image_reset()
+{
+    local answer='' android_volume web_volume android_image web_image helper users
+    if [ ! -f "$IMAGE_ENV_FILE" ] || [ ! -f "$IMAGE_COMPOSE_FILE" ]; then
+        fail "No image deployment configuration. Run image start first."; return 1
+    fi
+    android_volume="$(sed -n 's/^ANDROID_VOLUME=//p' "$IMAGE_ENV_FILE")"
+    web_volume="$(sed -n 's/^WEB_VOLUME=//p' "$IMAGE_ENV_FILE")"
+    android_image="$(sed -n 's/^ANDROID_IMAGE=//p' "$IMAGE_ENV_FILE")"
+    web_image="$(sed -n 's/^WEB_IMAGE=//p' "$IMAGE_ENV_FILE")"
+    if [[ ! "$android_volume" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ||
+          ! "$web_volume" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ || "$android_volume" = "$web_volume" ]]; then
+        fail "Reset requires separate, valid Android and web data volumes."; return 1
+    fi
+    echo "ANDROID FACTORY RESET (image mode)"
+    echo "This deletes installed apps, app data, Android accounts and settings."
+    echo "Target: $android_volume (avd/ and android.ready only)"
+    echo "Web accounts/passwords, images and other volume contents are preserved."
+    echo "Both services will be stopped, then started again."
+    if ! read -r -p "Type YES to reset Android: " answer || [ "$answer" != YES ]; then
+        echo "Reset cancelled."
+        return 0
+    fi
+    ensure_docker || return 1
+    check_kvm || return 1
+    check_image_containers || return 1
+    # Check prerequisites before stopping anything; reset never builds or publishes.
+    docker_cmd volume inspect "$android_volume" "$web_volume" >/dev/null || return 1
+    helper="$(docker_cmd image inspect --format '{{.Id}}' "$android_image")" || return 1
+    docker_cmd image inspect "$web_image" >/dev/null || return 1
+    idc down || return 1
+    users="$(docker_cmd ps -aq --filter "volume=$android_volume")" || return 1
+    if [ -n "$users" ]; then
+        fail "Another container references $android_volume; Android data was not reset."
+        return 1
+    fi
+    docker_cmd run --rm --pull never --network none --user 0:0 --entrypoint /bin/sh \
+        --mount "type=volume,src=$android_volume,dst=/reset-data" "$helper" \
+        -ec 'rm -rf -- /reset-data/avd /reset-data/android.ready' || return 1
+    ok "Android AVD state cleared; web accounts and passwords retained."
+    if ! idc up -d --no-build --pull never; then
+        fail "Android was reset, but startup failed. Check image log and retry image start."
+        return 1
+    fi
+    ok "Both services started after Android reset."
+}
+
 # Permanently remove one deployment's containers and Android/web state after confirmation.
 # Keep images and build caches. Never start a replacement phone or touch the other mode.
 cmd_purge()
@@ -2661,9 +2709,9 @@ cmd_image()
             fi
             if [ "$action" = build ]; then cmd_build_image "$@"; else cmd_image_start "$@"; fi
             ;;
-        purge)
-            if [ "$#" != 0 ]; then fail "purge takes no extra arguments."; return 2; fi
-            cmd_purge image
+        reset|purge)
+            if [ "$#" != 0 ]; then fail "$action takes no extra arguments."; return 2; fi
+            if [ "$action" = reset ]; then cmd_image_reset; else cmd_purge image; fi
             ;;
         stop|restart|down|log|status)
             if [ "$#" != 0 ]; then fail "$action takes no image arguments."; return 2; fi
@@ -2754,6 +2802,7 @@ Commands:
   stop              Stop both containers; retain all data
   restart           Restart both containers
   down              Remove both containers/network; retain both data volumes
+  reset             After YES, reset Android and restart both services; keep web accounts
   purge             After YES, remove both containers and DELETE Android/web data
   log               Follow logs from both services
   status            Show both services and their health

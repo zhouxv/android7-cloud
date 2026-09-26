@@ -65,7 +65,7 @@ flowchart LR
 
 网页数据库现在位于网页容器的 `/data/wsscrcpy.db`。旧单容器使用 `/data/web/wsscrcpy.db`，因此迁移需要在停止旧容器后复制网页子目录，重新初始化程序依赖，同时保留数据库和账号。完整操作和回滚步骤见 README。
 
-`down` 保留数据；`dev reset` 只重置 Android；`purge` 清除所选模式全部 Android 与网页运行状态。运行数据始终不进入发布镜像。
+`down` 保留数据；`image reset` / `dev reset` 只重置 Android 并重新启动，保留网页账号；`purge` 清除所选模式全部 Android 与网页运行状态。运行数据始终不进入发布镜像。
 
 ## 来源锁定与校验
 

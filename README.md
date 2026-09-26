@@ -65,6 +65,7 @@ chmod +x android7.sh
 | `image stop` | 停止两个容器，保留数据 |
 | `image restart` | 重启两个容器 |
 | `image down` | 移除两个容器和网络，保留两个数据卷 |
+| `image reset` | 输入 YES 后重置 Android 并重新启动两个容器，保留网页账号和密码 |
 | `image purge` | 输入 YES 后移除两个容器、删除两个数据卷，不自动启动 |
 | `image log` / `image status` | 两个服务的日志 / 状态 |
 | `dev start` | 准备来源、构建并启动两个开发容器 |
@@ -80,6 +81,8 @@ chmod +x android7.sh
 ```
 
 部署只使用镜像标签，不固定发布镜像的 SHA256。选择结果保存在 `.android7-image.env`，之后不带参数的 `image start` 会复用它。需要更新时先拉取新镜像，再把两个新引用显式传给 `image start`；Compose 重建相关容器并保留数据卷。
+
+`image reset` 只删除 Android 卷内的 `avd/` 和 `android.ready`，清除游戏、应用数据、Android 账号和设置；保留网页账号、密码和所选镜像。确认后停止两个服务，清理完成再启动，不构建或推送镜像。
 
 `purge` 永久删除游戏、应用文件、账号、设置、日志、网页密码；仅作用于所选模式。镜像、源码和下载/构建缓存保留。其他输入或输入结束会取消；若还有其他容器引用数据，清理会报错停止。下次启动创建新手机并重新设置密码。
 

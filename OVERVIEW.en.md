@@ -65,7 +65,7 @@ Development adds build sections and read-only `patched/` mounts, and uses projec
 
 The web database is now `/data/wsscrcpy.db` in the web container. The old combined container used `/data/web/wsscrcpy.db`. Migration therefore copies the web subtree after stopping the old container, reinitializing program dependencies while retaining the database/accounts. README contains complete migration and rollback instructions.
 
-`down` retains state; `dev reset` resets only Android; `purge` clears all Android/web state for the selected mode. Runtime state never enters published images.
+`down` retains state; `image reset` / `dev reset` reset only Android and restart, retaining web accounts; `purge` clears all Android/web state for the selected mode. Runtime state never enters published images.
 
 ## Source locking
 
