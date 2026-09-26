@@ -1,7 +1,11 @@
-# 忽略根目录下所有文件和目录
+# Ignore generated runtime files, caches and private data.
 /*
 
-# 取消忽略要上传的
+# Keep only the source scripts and language-specific documentation.
 !/.gitignore
 !/install-apk.sh
 !/android7.sh
+!/README.md
+!/README.en.md
+!/OVERVIEW.md
+!/OVERVIEW.en.md

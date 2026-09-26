@@ -27,6 +27,7 @@ CONTAINER="${REDROID_CONTAINER:-$DEFAULT_CONTAINER}"
 ANDROID_SHELL=()
 
 
+# Show installer options and multi-APK examples.
 print_usage() {
     cat <<EOF_USAGE
 Usage:
@@ -60,6 +61,7 @@ EOF_USAGE
 }
 
 
+# Check container state, choose emulator ADB or direct ReDroid shell and verify package-manager readiness.
 check_container() {
     echo "Checking container: $CONTAINER"
 
@@ -111,11 +113,13 @@ check_container() {
 }
 
 
+# Execute the supplied Android shell command through the selected transport.
 android_shell() {
     docker exec "$CONTAINER" "${ANDROID_SHELL[@]}" "$1"
 }
 
 
+# Stream one APK, verify byte count, run pm install -r and clean temporary files; return nonzero on failure.
 install_one_apk() {
     local apk="$1"
     local apk_abs
@@ -286,6 +290,7 @@ install_one_apk() {
 }
 
 
+# Parse container/APK arguments, install each package and aggregate failures.
 main() {
     local failed=0
     local apk
