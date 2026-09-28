@@ -4,7 +4,8 @@
 # Android Emulator / ReDroid APK Installer
 #
 # Default container:
-#   android7-cloudphone
+#   yanyu-android7 (image mode)
+#   For dev mode, pass: -c yanyu-android7-dev
 #
 # Container can be specified by:
 #
@@ -22,7 +23,7 @@
 # APKs are streamed into /data/local/tmp instead.
 # ============================================================
 
-DEFAULT_CONTAINER="android7-cloudphone"
+DEFAULT_CONTAINER="yanyu-android7"
 CONTAINER="${REDROID_CONTAINER:-$DEFAULT_CONTAINER}"
 ANDROID_SHELL=()
 
@@ -48,6 +49,8 @@ Options:
 
 Examples:
   $0 ~/app.apk
+
+  $0 -c yanyu-android7-dev ~/app.apk
 
   $0 -c android7-ndk023-test ~/app.apk
 
@@ -119,11 +122,13 @@ android_shell() {
 }
 
 
-# Stream one APK, verify byte count, run pm install -r and clean temporary files; return nonzero on failure.
+# Stream a completed APK, detect source changes, verify byte count and install it.
 install_one_apk() {
     local apk="$1"
     local apk_abs
     local host_size
+    local host_state
+    local host_state_after
     local container_size
     local tmp_apk
     local cat_rc
@@ -147,9 +152,12 @@ install_one_apk() {
         apk_abs="$apk"
     fi
 
-    host_size="$(
-        stat -c '%s' "$apk" 2>/dev/null
+    # Record identity, size and nanosecond timestamps to detect ongoing downloads
+    # or replacement of the source while the APK is being streamed.
+    host_state="$(
+        stat -L -c '%s:%d:%i:%y:%z' -- "$apk" 2>/dev/null
     )"
+    host_size="${host_state%%:*}"
 
     if [ -z "$host_size" ]; then
         echo
@@ -219,6 +227,19 @@ install_one_apk() {
         android_shell "rm -f '$tmp_apk'" \
             >/dev/null 2>&1 || true
 
+        return 1
+    fi
+
+    host_state_after="$(stat -L -c '%s:%d:%i:%y:%z' -- "$apk" 2>/dev/null)"
+    if [ "$host_state" != "$host_state_after" ]; then
+        echo
+        echo "ERROR: Source APK changed or became unavailable during transfer."
+        echo "  size before: $host_size"
+        echo "  size after : ${host_state_after%%:*}"
+        echo "Wait for the download or file copy to finish, then run this command again."
+
+        android_shell "rm -f '$tmp_apk'" \
+            >/dev/null 2>&1 || true
         return 1
     fi
 

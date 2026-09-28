@@ -44,6 +44,8 @@ flowchart LR
 
 Development adds build sections and read-only `patched/` mounts, and uses project directories for state. Image deployment has no build sections, embeds system files and uses two named volumes. Only host-local port 8000 is published; no separate ADB port is exposed.
 
+Image mode uses `yanyu-android7` and `yanyu-ws-scrcpy-web`; dev uses `yanyu-android7-dev` and `yanyu-ws-scrcpy-web-dev`. Compose ownership and state locations remain separate, but both modes use port 8000: stop or remove the other deployment before switching. Lifecycle and `purge` operations still check Compose ownership. Saved `.android7.env` names keep legacy dev containers manageable until they are removed and recreated.
+
 ## Image command flow
 
 `image pull/start → cmd_image_start`:

@@ -44,6 +44,8 @@ flowchart LR
 
 开发模式追加 `build` 配置及 `patched/` 只读挂载，数据使用项目目录。镜像模式没有 `build` 配置，系统文件已内置，数据使用两个命名卷。只有宿主本地 8000 被发布，ADB 不额外开放端口。
 
+image 容器名为 `yanyu-android7` 和 `yanyu-ws-scrcpy-web`；dev 使用 `yanyu-android7-dev` 和 `yanyu-ws-scrcpy-web-dev`。Compose 归属与数据位置独立，但两种模式使用相同的 8000 端口，切换前需停止或移除另一种模式的容器。生命周期及 `purge` 操作仍检查 Compose 归属。旧 dev 名称从已有 `.android7.env` 读取，以便升级前管理和移除旧容器。
+
 ## image 命令链
 
 `image pull/start → cmd_image_start`：

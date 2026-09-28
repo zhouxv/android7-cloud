@@ -41,6 +41,7 @@ chmod +x android7.sh
 | 项目 | `image` | `dev` |
 | --- | --- | --- |
 | 运行结构 | Android + 网页两个容器 | 相同 |
+| 容器名 | `yanyu-android7` + `yanyu-ws-scrcpy-web` | `yanyu-android7-dev` + `yanyu-ws-scrcpy-web-dev` |
 | 网络 | 网页共享 Android 网络命名空间，只发布本地 8000 | 相同 |
 | 参数、健康检查、启动顺序 | 共用生成器 | 相同 |
 | 镜像来源 | 拉取或复用已经构建的两个镜像 | 从固定来源构建 |
@@ -48,7 +49,25 @@ chmod +x android7.sh
 | Android 状态 | `yanyu-android7-data` 卷 | `docker-state/` |
 | 网页状态 | `yanyu-ws-scrcpy-data` 卷 | `ws-scrcpy-data/` |
 
-两种模式使用不同容器和数据，但都默认占用 8000 端口，不能同时占用该端口。切换模式不会自动迁移另一种模式的数据。
+image 容器名为 `yanyu-android7` 和 `yanyu-ws-scrcpy-web`；dev 分别加上 `-dev` 后缀。两种模式的数据分别保存，但都使用本地 8000 端口，启动前需要先 `stop` 或 `down` 另一种模式。以下使用 `down`，会移除容器并保留数据。脚本仍检查容器归属，切换不会自动迁移数据。
+
+```bash
+# image → dev
+./android7.sh image down
+./android7.sh dev start
+
+# dev → image
+./android7.sh dev down
+./android7.sh image start
+
+# image 模式：可省略容器名
+./install-apk.sh /path/to/game.apk
+
+# dev 模式：指定带 -dev 后缀的容器名
+./install-apk.sh -c yanyu-android7-dev /path/to/game.apk
+```
+
+旧 dev 容器（包括曾使用无后缀名称的版本）仍可通过已保存的配置管理；执行 `dev down` 后再 `dev start` 即使用带 `-dev` 后缀的名称，原有目录数据保留。
 
 ## 命令
 

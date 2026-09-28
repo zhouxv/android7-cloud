@@ -41,6 +41,7 @@ Open `http://localhost:8000`, set the `admin` password, then click the device's 
 | Aspect | `image` | `dev` |
 | --- | --- | --- |
 | Services | Separate Android and web containers | Same |
+| Container names | `yanyu-android7` + `yanyu-ws-scrcpy-web` | `yanyu-android7-dev` + `yanyu-ws-scrcpy-web-dev` |
 | Network | Web shares Android's network namespace; only local port 8000 is published | Same |
 | Settings, health checks, startup order | Shared generator | Same |
 | Images | Pull/reuse two prebuilt images | Build from pinned sources |
@@ -48,7 +49,25 @@ Open `http://localhost:8000`, set the `admin` password, then click the device's 
 | Android state | `yanyu-android7-data` volume | `docker-state/` |
 | Web state | `yanyu-ws-scrcpy-data` volume | `ws-scrcpy-data/` |
 
-Modes have separate containers/data but both use port 8000 by default. Stop the other deployment before switching. Switching modes does not automatically migrate data.
+Image mode uses `yanyu-android7` and `yanyu-ws-scrcpy-web`; dev appends `-dev` to each name. State remains separate, but both modes publish local port 8000: stop or take down the other deployment before starting. The examples use `down`, which removes containers while preserving data. Ownership checks remain in place, and switching does not migrate data.
+
+```bash
+# image → dev
+./android7.sh image down
+./android7.sh dev start
+
+# dev → image
+./android7.sh dev down
+./android7.sh image start
+
+# Image mode: the container name is optional
+./install-apk.sh /path/to/game.apk
+
+# Dev mode: specify the container with the -dev suffix
+./install-apk.sh -c yanyu-android7-dev /path/to/game.apk
+```
+
+Legacy dev containers, including versions that used names without a suffix, remain manageable through the saved configuration. Run `dev down`, then `dev start` to adopt the `-dev` names while retaining existing directory data.
 
 ## Commands
 

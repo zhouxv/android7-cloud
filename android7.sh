@@ -54,7 +54,9 @@ MANIFEST_FILE="${BASE_DIR}/docker-manifest.txt"
 # ============================================================
 
 SERVICE_NAME="android7"
-CONTAINER_NAME="android7-cloudphone"
+# Development containers use a suffix; published deployments keep the base names.
+CONTAINER_NAME="yanyu-android7-dev"
+WEB_CONTAINER_NAME="yanyu-ws-scrcpy-web-dev"
 
 RUNTIME_IMAGE="android7-cloudphone:api25-houdini-magisk-v1"
 
@@ -1822,7 +1824,7 @@ RUNTIME_IMAGE=${RUNTIME_IMAGE}
 ANDROID_IMAGE=${RUNTIME_IMAGE}
 WEB_IMAGE=android7-ws-scrcpy-web:auth-setup-v2
 ANDROID_CONTAINER=${CONTAINER_NAME}
-WEB_CONTAINER=android7-ws-scrcpy-web
+WEB_CONTAINER=${WEB_CONTAINER_NAME}
 ANDROID_DATA=./docker-state
 WEB_DATA=./ws-scrcpy-data
 
@@ -2209,6 +2211,8 @@ cmd_down()
 # Restart existing services, falling back to normal start if absent; use start for configuration changes.
 cmd_restart()
 {
+    local container
+    container="$(dev_container_name ANDROID_CONTAINER "$CONTAINER_NAME")"
     prepare_dirs
 
     ensure_docker ||
@@ -2216,7 +2220,7 @@ cmd_restart()
 
     if ! docker_cmd \
         inspect \
-        "${CONTAINER_NAME}" \
+        "$container" \
         >/dev/null 2>&1
     then
 
@@ -2347,6 +2351,8 @@ cmd_log()
 # Show container state, health and Android diagnostics, or explain how to initialize the project.
 cmd_status()
 {
+    local container
+    container="$(dev_container_name ANDROID_CONTAINER "$CONTAINER_NAME")"
     prepare_dirs
 
     ensure_docker ||
@@ -2364,7 +2370,7 @@ cmd_status()
 
     printf '%-20s %s\n' \
         "Container:" \
-        "${CONTAINER_NAME}"
+        "$container"
 
     printf '%-20s %s\n' \
         "Persistent state:" \
@@ -2390,7 +2396,7 @@ cmd_status()
 
     if docker_cmd \
         inspect \
-        "${CONTAINER_NAME}" \
+        "$container" \
         >/dev/null 2>&1
     then
 
@@ -2416,7 +2422,7 @@ cmd_status()
     state="$(
         docker_cmd \
             inspect \
-            "${CONTAINER_NAME}" \
+            "$container" \
             --format \
             '{{.State.Status}}' \
             2>/dev/null ||
@@ -2426,7 +2432,7 @@ cmd_status()
     health="$(
         docker_cmd \
             inspect \
-            "${CONTAINER_NAME}" \
+            "$container" \
             --format \
             '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \
             2>/dev/null ||
@@ -2457,7 +2463,7 @@ cmd_status()
 
     docker_cmd \
         exec \
-        "${CONTAINER_NAME}" \
+        "$container" \
         /opt/android/status.sh ||
         true
 
@@ -2489,7 +2495,43 @@ EOF
     write_compose image
 }
 
-# Reject old combined containers instead of treating their nested web state as a fresh account.
+# Read saved names so older dev deployments can still be stopped or inspected.
+dev_container_name()
+{
+    local value=''
+    if [ -f "$ENV_FILE" ]; then
+        value="$(sed -n "s/^${1}=//p" "$ENV_FILE")"
+    fi
+    printf '%s\n' "${value:-$2}"
+}
+
+# Target containers must belong to this mode before any lifecycle or purge operation.
+# Also check saved legacy dev names until the next dev start rewrites the config.
+check_dev_containers()
+{
+    local target config project
+    local -a targets=("$CONTAINER_NAME" "$WEB_CONTAINER_NAME"
+        "$(dev_container_name ANDROID_CONTAINER "$CONTAINER_NAME")"
+        "$(dev_container_name WEB_CONTAINER "$WEB_CONTAINER_NAME")")
+    for target in "${targets[@]}"; do
+        if docker_cmd container inspect "$target" >/dev/null 2>&1; then
+            config="$(docker_cmd container inspect --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}' "$target")" || return 1
+            project="$(docker_cmd container inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' "$target")" || return 1
+            if [ "$config" != "$COMPOSE_FILE" ] || [ "$project" = "$IMAGE_PROJECT" ]; then
+                fail "$target belongs to another deployment; dev operation cancelled."
+                if [ "$project" = "$IMAGE_PROJECT" ]; then
+                    echo "Switch modes with './android7.sh image down', then './android7.sh dev start'."
+                    echo "down preserves data; stop alone does not release container names."
+                else
+                    echo "Remove the conflicting container through its owning deployment first; preserve its data."
+                fi
+                return 1
+            fi
+        fi
+    done
+}
+
+# Reject other modes and old combined containers instead of taking over their state.
 check_image_containers()
 {
     local target project
@@ -2498,7 +2540,9 @@ check_image_containers()
             project="$(docker_cmd container inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' "$target")" || return 1
             if [ "$project" != "$IMAGE_PROJECT" ]; then
                 fail "$target is not managed by this two-container deployment."
-                echo "Preserve its data and migrate it first; see README.en.md."
+                echo "For a dev deployment, run './android7.sh dev down' before image start."
+                echo "down preserves data; stop alone does not release container names."
+                echo "For other/legacy deployments, preserve and migrate data first; see README.en.md."
                 return 1
             fi
         fi
@@ -2622,7 +2666,8 @@ cmd_purge()
             volumes=("$RELEASE_WEB_VOLUME" "$RELEASE_VOLUME")
             ;;
         dev)
-            containers=(android7-ws-scrcpy-web "$CONTAINER_NAME")
+            containers=("$(dev_container_name WEB_CONTAINER "$WEB_CONTAINER_NAME")"
+                "$(dev_container_name ANDROID_CONTAINER "$CONTAINER_NAME")")
             paths=("${BASE_DIR}/docker-state" "${BASE_DIR}/ws-scrcpy-data")
             ;;
         *) fail "Unknown purge mode: $mode"; return 2 ;;
@@ -2641,6 +2686,11 @@ cmd_purge()
         return 0
     fi
     ensure_docker --engine-only || return 1
+    if [ "$mode" = image ]; then
+        check_image_containers || return 1
+    else
+        check_dev_containers || return 1
+    fi
 
     # A local project image supplies root permissions for root-owned development files.
     # Reject redirected directories and do not download anything just to delete data.
@@ -2740,6 +2790,12 @@ cmd_dev()
         fail "Development commands take no extra arguments."; return 2
     fi
     case "${1:-help}" in
+        start|stop|restart|down|reset|log|status)
+            ensure_docker || return 1
+            check_dev_containers || return 1
+            ;;
+    esac
+    case "${1:-help}" in
         start) cmd_start ;;
         stop) cmd_stop ;;
         restart) cmd_restart ;;
@@ -2813,6 +2869,8 @@ Default images:
   $RELEASE_WEB_IMAGE
 Containers: $RELEASE_CONTAINER + $RELEASE_WEB_CONTAINER
 Volumes:    $RELEASE_VOLUME + $RELEASE_WEB_VOLUME
+Switch from dev: ./android7.sh dev down, then ./android7.sh image start.
+Both modes use port 8000; stop or remove the other deployment before starting.
 
 Examples:
   ./android7.sh image build
@@ -2847,11 +2905,12 @@ Commands:
   status     Show Android, ADB, root and container diagnostics
   help       Show this page
 
-Containers: android7-cloudphone + android7-ws-scrcpy-web
+Containers: ${CONTAINER_NAME} + ${WEB_CONTAINER_NAME}
 State:      ${STATE_DIR} and ${BASE_DIR}/ws-scrcpy-data
 Web:        http://127.0.0.1:8000
 
-Do not run development and image deployments on the same host port.
+Switch from image: ./android7.sh image down, then ./android7.sh dev start.
+Both modes use port 8000; stop or remove the other deployment before starting.
 Generated Docker/Compose files are overwritten by the next dev start/build.
 Edit android7.sh instead. Original flat commands remain aliases for dev commands.
 EOF_HELP
