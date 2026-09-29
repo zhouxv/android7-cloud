@@ -49,6 +49,24 @@ Open `http://localhost:8000` locally or `http://<server-ip>:8000` remotely, sign
 ./install-apk.sh -c yanyu-android7 /path/to/game.apk
 ```
 
+## Pull remote images only
+
+The standalone `android7-image.sh` **only downloads the Android and web images**. It does not build, push, create/start containers, or generate volumes/configuration. It needs Docker and registry connectivity, but does not depend on `android7.sh`, Compose or KVM.
+
+```bash
+chmod +x android7-image.sh
+./android7-image.sh
+# Use sudo ./android7-image.sh if Docker access requires elevated permissions
+```
+
+Defaults are the `1.1-android` and `1.1-web` tags above. Every invocation runs `docker pull` against the registry, including for locally cached tags; Docker reuses unchanged layers. The platform is `linux/amd64`, without required image digests. To download another pair:
+
+```bash
+./android7-image.sh myrepo/phone:1.2-android myrepo/phone:1.2-web
+```
+
+Either pull failing returns a nonzero exit code; already downloaded images are retained. Running containers are not updated. For private registries, run `docker login` under the same user first. The original `android7.sh image pull` also starts the phone; **use `android7-image.sh` when you only want to download images**.
+
 ## Host checks and dependency installation
 
 Both standalone scripts provide `--help` and use the complete toolset: Docker, Compose, Buildx, Python 3, curl, 7z and SHA256 tools. There is no image/dev mode selection. Both ports 8000 and 8001 are checked by default. Neither script starts a cloud phone nor changes its data.
@@ -355,7 +373,7 @@ For unavailable web access, inspect both services' health/logs. Check for other 
 
 ## Project files
 
-Only `android7.sh`, `install-apk.sh`, `check-host.sh`, `install-deps.sh`, Chinese/English README and OVERVIEW files, and `.gitignore` are versioned. Scripts/help are English; documentation is separated by language.
+Only `android7.sh`, `android7-image.sh`, `install-apk.sh`, `check-host.sh`, `install-deps.sh`, Chinese/English README and OVERVIEW files, and `.gitignore` are versioned. Scripts/help are English; documentation is separated by language.
 
 `docker/`, `patched/`, `downloads/`, Compose/environment files, manifests and runtime data are generated and ignored. Edit the main generator rather than generated Compose/Dockerfiles, which are overwritten. Separate `image/` and `tests/` directories are unnecessary.
 

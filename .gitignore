@@ -5,6 +5,7 @@
 !/.gitignore
 !/install-apk.sh
 !/android7.sh
+!/android7-image.sh
 !/check-host.sh
 !/install-deps.sh
 !/README.md

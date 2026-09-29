@@ -49,6 +49,24 @@ chmod +x android7.sh
 ./install-apk.sh -c yanyu-android7 /path/to/game.apk
 ```
 
+## 仅拉取远程镜像
+
+独立的 `android7-image.sh` **只下载 Android 和网页两个镜像**，不构建、不推送、不创建或启动容器，也不生成数据卷或配置文件。无需 `android7.sh`、Compose 或 KVM，下载时只需要 Docker 和仓库网络连接。
+
+```bash
+chmod +x android7-image.sh
+./android7-image.sh
+# 当前用户没有 Docker 权限时使用 sudo ./android7-image.sh
+```
+
+默认拉取上表中的 `1.1-android` 和 `1.1-web`。每次均向远程仓库执行 `docker pull`，本地已有镜像也会检查标签更新，未变化的层由 Docker 复用；固定平台为 `linux/amd64`，不强制镜像摘要。可以指定另一对远程镜像：
+
+```bash
+./android7-image.sh myrepo/phone:1.2-android myrepo/phone:1.2-web
+```
+
+任一拉取失败会返回非零退出码，已经下载的镜像保留；拉取不会更新正在运行的容器。私有仓库需先以相同用户执行 `docker login`。注意原来的 `android7.sh image pull` 会自动启动云手机；**只想下载时使用 `android7-image.sh`**。
+
 ## 宿主机检查与依赖安装
 
 两个独立脚本均提供 `--help`，统一安装或检查 Docker、Compose、Buildx、Python 3、curl、7z、SHA256 等完整工具，不区分 image/dev 模式。默认检查 8000 和 8001 两个端口，不会启动云手机或修改云手机数据。
@@ -355,7 +373,7 @@ docker exec yanyu-android7 rm /tmp/game.apk
 
 ## 项目文件
 
-版本管理只保留 `android7.sh`、`install-apk.sh`、`check-host.sh`、`install-deps.sh`、中英文 README/OVERVIEW 和 `.gitignore`。脚本及帮助纯英文，说明文档按语言分开。
+版本管理只保留 `android7.sh`、`android7-image.sh`、`install-apk.sh`、`check-host.sh`、`install-deps.sh`、中英文 README/OVERVIEW 和 `.gitignore`。脚本及帮助纯英文，说明文档按语言分开。
 
 `docker/`、`patched/`、`downloads/`、Compose、环境文件、构建清单和运行数据均自动生成且不纳入版本管理。不要手改生成的 Compose/Dockerfile，下次运行会覆盖；请改主脚本。无需独立 `image/`、`tests/` 目录。
 
