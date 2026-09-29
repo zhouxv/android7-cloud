@@ -17,6 +17,7 @@ RELEASE_WEB_VOLUME=yanyu-ws-scrcpy-data
 DEFAULT_WEB_PORT=8000
 DOCKER_CMD=()
 WEB_ACCESS_REQUEST=''
+WEB_PORT_REQUEST=''
 
 info() { printf '\n[INFO] %s\n' "$*"; }
 ok() { printf '[ OK ] %s\n' "$*"; }
@@ -43,6 +44,9 @@ check_kvm() {
     [[ $(uname -s) == Linux && $(uname -m) == x86_64 ]] || { fail 'Requires Linux x86_64.'; return 1; }
     [[ -c /dev/kvm ]] || { fail 'KVM is missing. Run check-host.sh and enable hardware/nested virtualization.'; return 1; }
 }
+
+# Accept one decimal TCP port; reject ambiguous or out-of-range input before Docker runs.
+valid_web_port() { [[ $1 =~ ^[1-9][0-9]{0,4}$ ]] && (( $1 <= 65535 )); }
 
 valid_image() {
     [[ $1 =~ ^[a-zA-Z0-9][a-zA-Z0-9._/:-]*$ && $1 != sha256:* ]]
@@ -72,7 +76,7 @@ load_config() {
             ANDROID_DATA) [[ $value == android-data ]] || return 1 ;;
             WEB_DATA) [[ $value == web-data ]] || return 1 ;;
             WEB_BIND_IP) [[ $value == 0.0.0.0 || $value == 127.0.0.1 ]] || return 1 ;;
-            WEB_PORT) [[ $value == "$DEFAULT_WEB_PORT" ]] || { fail 'Unexpected web port in configuration.'; return 1; } ;;
+            WEB_PORT) valid_web_port "$value" || { fail 'Invalid saved web port (use 1-65535).'; return 1; }; WEB_PORT=$value ;;
             *) fail "Unknown configuration key: $key"; return 1 ;;
         esac
     done < "$IMAGE_ENV_FILE"
@@ -143,6 +147,7 @@ check_volume_users() {
 # Generate deployment configuration only; there are no build directives.
 write_config() {
     WEB_ACCESS_MODE=${WEB_ACCESS_REQUEST:-$WEB_ACCESS_MODE}
+    WEB_PORT=${WEB_PORT_REQUEST:-$WEB_PORT}
     WEB_BIND_IP=0.0.0.0
     [[ $WEB_ACCESS_MODE != safe ]] || WEB_BIND_IP=127.0.0.1
     local temporary
@@ -466,13 +471,14 @@ usage() {
 Yan Yu Jiang Hu - standalone Android 7 image deployment
 
 Usage: ./android7-image.sh COMMAND [options]
-       ./android7-image.sh start [--safe|--public] [ANDROID_IMAGE WEB_IMAGE]
+       ./android7-image.sh start [--safe|--public] [--port PORT] [ANDROID_IMAGE WEB_IMAGE]
 
 Start and download:
   start / pull      Reuse local tags or pull missing images, then START both services
   download          Pull both remote tags ONLY; do not create/start containers
   --safe            Localhost access only (start/pull); choice is saved
   --public          Access via server IP (start/pull); default, sign-in still required
+  --port PORT       Set host web port (1-65535, start/pull); saved for later starts
   Both image tags are optional; provide both or neither. Tags only, no digest pins.
 
 Manage:
@@ -498,7 +504,7 @@ Defaults:
 
 Examples:
   ./android7-image.sh start
-  ./android7-image.sh start --safe
+  ./android7-image.sh start --safe --port 18000
   ./android7-image.sh download
   ./android7-image.sh start myrepo/phone:android myrepo/phone:web
   ./android7-image.sh password
@@ -507,6 +513,8 @@ Requires Linux x86_64, KVM, Docker and Compose (download needs only Docker).
 No builds, pushes or migrations. This file works without android7.sh.
 Uses the same .android7-image.env / compose.image.yml as the main script in this folder.
 Keep those files with the script; do not run two managers concurrently.
+Use start --port PORT to change a binding; restart retains the existing port.
+Changing a port briefly recreates containers but preserves data and passwords.
 Download does not change saved configuration. To select downloaded custom tags,
 pass both tags to start. Existing manual Docker containers are not silently adopted.
 EOF
@@ -516,16 +524,26 @@ main() (
     local action=${1:-help} arg
     local -a refs=()
     WEB_ACCESS_REQUEST=''
+    WEB_PORT_REQUEST=''
     (($# == 0)) || shift
     case "$action" in help|-h|--help) usage; return 0 ;; esac
     if [[ ${1:-} == --help || ${1:-} == -h ]]; then usage; return 0; fi
     case "$action" in
         start|pull|download)
-            for arg in "$@"; do
+            while (($#)); do
+                arg=$1; shift
                 case "$arg" in
                     --safe|--public)
                         if [[ $action == download || -n $WEB_ACCESS_REQUEST ]]; then fail 'Access options apply once to start/pull only.'; return 2; fi
                         WEB_ACCESS_REQUEST=${arg#--} ;;
+                    --port|--port=*)
+                        if [[ $action == download || -n $WEB_PORT_REQUEST ]]; then fail 'Specify --port once, for start/pull only.'; return 2; fi
+                        if [[ $arg == --port ]]; then
+                            (($#)) || { fail '--port requires a value (1-65535).'; return 2; }
+                            WEB_PORT_REQUEST=$1; shift
+                        else WEB_PORT_REQUEST=${arg#--port=}; fi
+                        valid_web_port "$WEB_PORT_REQUEST" || { fail 'Use a decimal port from 1 to 65535.'; return 2; }
+                        ;;
                     -*) fail "Unknown option: $arg"; return 2 ;;
                     *) refs+=("$arg") ;;
                 esac

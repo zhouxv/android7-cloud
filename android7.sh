@@ -1941,15 +1941,21 @@ main(process.argv[1]);"
         "$container" node -e "$js" change
 }
 
-# Resolve and remember access per deployment; published and dev ports never overlap.
+# Accept one decimal TCP port; reject ambiguous or out-of-range input before Docker runs.
+valid_web_port() { [[ $1 =~ ^[1-9][0-9]{0,4}$ ]] && (( $1 <= 65535 )); }
+
+# Resolve and remember access and host port independently for each deployment.
 resolve_web_access()
 {
-    local mode="$1" config="$ENV_FILE" saved=''
+    local mode="$1" config="$ENV_FILE" saved='' saved_port=''
     WEB_PORT=8001
     if [ "$mode" = image ]; then config="$IMAGE_ENV_FILE"; WEB_PORT=8000; fi
     if [ -f "$config" ]; then
         saved="$(sed -n 's/^WEB_ACCESS_MODE=//p' "$config")"
+        saved_port="$(sed -n 's/^WEB_PORT=//p' "$config")"
     fi
+    WEB_PORT="${WEB_PORT_REQUEST:-${saved_port:-$WEB_PORT}}"
+    valid_web_port "$WEB_PORT" || { fail "Invalid web port; use start --port PORT (1-65535)."; return 2; }
     WEB_ACCESS_MODE="${WEB_ACCESS_REQUEST:-${saved:-public}}"
     case "$WEB_ACCESS_MODE" in
         public) WEB_BIND_IP=0.0.0.0 ;;
@@ -3179,20 +3185,29 @@ cmd_data_migrate()
 cmd_image()
 {
     local action="${1:-help}"
-    local WEB_ACCESS_REQUEST='' arg
+    local WEB_ACCESS_REQUEST='' WEB_PORT_REQUEST='' arg
     local -a image_args=()
     if [ "$#" -gt 0 ]; then shift; fi
     if [[ "${1:-}" == -h || "${1:-}" == --help ]]; then cmd_help image; return; fi
     case "$action" in
         help|-h|--help) cmd_help image ;;
         pull|start)
-            for arg in "$@"; do
+            while [ "$#" -gt 0 ]; do
+                arg="$1"; shift
                 case "$arg" in
                     --safe|--public)
                         if [ -n "$WEB_ACCESS_REQUEST" ]; then
                             fail "Specify only one access option: --safe or --public."; return 2
                         fi
                         WEB_ACCESS_REQUEST="${arg#--}"
+                        ;;
+                    --port|--port=*)
+                        [ -z "$WEB_PORT_REQUEST" ] || { fail 'Specify --port only once.'; return 2; }
+                        if [ "$arg" = --port ]; then
+                            [ "$#" -gt 0 ] || { fail '--port requires a value (1-65535).'; return 2; }
+                            WEB_PORT_REQUEST="$1"; shift
+                        else WEB_PORT_REQUEST="${arg#--port=}"; fi
+                        valid_web_port "$WEB_PORT_REQUEST" || { fail 'Use a decimal port from 1 to 65535.'; return 2; }
                         ;;
                     --*) fail "Unknown start option: $arg"; return 2 ;;
                     *) image_args+=("$arg") ;;
@@ -3239,14 +3254,29 @@ cmd_image()
 # Dispatch the original two-container source-development workflow.
 cmd_dev()
 {
-    local WEB_ACCESS_REQUEST=''
-    if [ "${1:-}" = start ] && [ "$#" = 2 ]; then
-        case "$2" in
-            --safe|--public) WEB_ACCESS_REQUEST="${2#--}"; set -- start ;;
-        esac
-    fi
-    if [ "$#" -gt 1 ]; then
-        if [[ "${2:-}" == -h || "${2:-}" == --help ]]; then cmd_help dev; return; fi
+    local WEB_ACCESS_REQUEST='' WEB_PORT_REQUEST='' arg
+    if [[ "${2:-}" == -h || "${2:-}" == --help ]]; then cmd_help dev; return; fi
+    if [ "${1:-}" = start ]; then
+        shift
+        while [ "$#" -gt 0 ]; do
+            arg="$1"; shift
+            case "$arg" in
+                --safe|--public)
+                    [ -z "$WEB_ACCESS_REQUEST" ] || { fail 'Specify only one access option.'; return 2; }
+                    WEB_ACCESS_REQUEST="${arg#--}" ;;
+                --port|--port=*)
+                    [ -z "$WEB_PORT_REQUEST" ] || { fail 'Specify --port only once.'; return 2; }
+                    if [ "$arg" = --port ]; then
+                        [ "$#" -gt 0 ] || { fail '--port requires a value (1-65535).'; return 2; }
+                        WEB_PORT_REQUEST="$1"; shift
+                    else WEB_PORT_REQUEST="${arg#--port=}"; fi
+                    valid_web_port "$WEB_PORT_REQUEST" || { fail 'Use a decimal port from 1 to 65535.'; return 2; }
+                    ;;
+                *) fail "Unknown dev start option: $arg"; return 2 ;;
+            esac
+        done
+        set -- start
+    elif [ "$#" -gt 1 ]; then
         fail "Development commands take no extra arguments."; return 2
     fi
     case "${1:-help}" in
@@ -3314,9 +3344,10 @@ EOF_HELP
             ;;
         image)
             cat <<EOF_HELP
-Usage: ./android7.sh image <command> [--safe|--public] [ANDROID_IMAGE WEB_IMAGE]
+Usage: ./android7.sh image <command> [--safe|--public] [--port PORT] [ANDROID_IMAGE WEB_IMAGE]
 Provide both IMAGE:TAG arguments or neither. Deployment uses tags only.
-Access options apply only to pull/start and are saved for subsequent starts.
+Access/port options apply only to pull/start and are saved for subsequent starts.
+--port PORT sets the host web port (1-65535); changing it retains all data.
 
 Commands:
   pull/start        Reuse or pull both images, then start two containers
@@ -3338,12 +3369,13 @@ Containers: $RELEASE_CONTAINER + $RELEASE_WEB_CONTAINER
 Volumes:    $RELEASE_VOLUME + $RELEASE_WEB_VOLUME
 Web: http://<server-ip>:8000 (default public access; sign-in required)
 Use start --safe for localhost only, or start --public to enable remote access.
-Image uses port 8000; dev uses 8001. Both modes can run together with enough RAM.
+Default ports: image 8000, dev 8001. Use start --port PORT to avoid conflicts.
+Both modes can run together with distinct ports and enough RAM.
 
 Examples:
   ./android7.sh image build
   ./android7.sh image start
-  ./android7.sh image start --safe
+  ./android7.sh image start --safe --port 18000
   ./android7.sh image start --public
   ./android7.sh image start myrepo/phone:android myrepo/phone:web
 
@@ -3361,7 +3393,7 @@ EOF_HELP
         dev)
             cat <<EOF_HELP
 Usage: ./android7.sh dev <command>
-       ./android7.sh dev start [--safe|--public]
+       ./android7.sh dev start [--safe|--public] [--port PORT]
 
 Commands:
   start      Prepare sources, build and start the two development containers
@@ -3383,8 +3415,10 @@ State:      ${STATE_DIR} and ${WEB_STATE_DIR}
 Web:        http://<server-ip>:8001 (default public access; sign-in required)
 
 Use start --safe for localhost only, or start --public to enable remote access.
-The access choice is saved for subsequent starts; restart keeps existing bindings.
-Image uses port 8000; dev uses 8001. Both modes can run together with enough RAM.
+Access and port choices are saved; restart keeps existing bindings.
+--port PORT accepts 1-65535. Use start to apply a new port; data is retained.
+Default ports: image 8000, dev 8001. Use start --port PORT to avoid conflicts.
+Both modes can run together with distinct ports and enough RAM.
 Generated Docker/Compose files are overwritten by the next dev start/build.
 Edit android7.sh instead. Original flat commands remain aliases for dev commands.
 EOF_HELP

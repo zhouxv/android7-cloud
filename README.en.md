@@ -229,6 +229,90 @@ The default allows access through the server IP, with the generated password sti
 
 Each mode saves its choice in `.android7-image.env` or `.android7.env`. Later starts without an option retain it; without a saved choice the default is `public`. Use `start` to apply changed bindings: `restart` does not update ports. Recreating affected containers briefly interrupts connections but preserves Android and web login data. `image pull` also accepts these options.
 
+### Custom web port
+
+Use `start --port PORT` to choose a different host port (decimal integer 1–65535). The standalone script and both main-script modes support it; image `pull` also accepts it:
+
+```bash
+sudo ./android7-image.sh start --port 18000
+sudo ./android7-image.sh start --public --port 18000
+sudo ./android7.sh image start --port 18000
+sudo ./android7.sh dev start --port 18001
+```
+
+These are alternative examples: choose the entry point you use. With public access, open `http://<server-ip>:18000` and allow the selected port through the server firewall/security group. Combine with `start --safe --port 18000` for localhost access.
+
+The port is saved per mode and retained by subsequent `start`, `pull`, `restart`, and `reset` operations. To change it, run `start --port NEW_PORT`; `restart` does not accept this option. The internal web port remains 8000. Changing the host port briefly interrupts the connection while preserving phone data and web credentials. Defaults remain image 8000 and dev 8001; choose distinct ports when running both. The script does not stop other programs occupying a port; choose another port if Docker reports a conflict.
+
+## Safe-mode startup and SSH forwarding
+
+Use this chapter to access a remote phone from your own computer. Safe mode binds the web service to the server's loopback address. SSH then forwards it to a loopback port on your computer. Web sign-in stays enabled; only the SSH port needs to be reachable remotely.
+
+### 1. On the cloud phone server
+
+```bash
+cd "$HOME/android7-cloud"
+sudo ./android7-image.sh start --safe
+sudo ./android7-image.sh status
+sudo docker port yanyu-android7 8000/tcp
+```
+
+The last command should show `127.0.0.1:8000`. With the main script, use `sudo ./android7.sh image start --safe`. Development mode uses `sudo ./android7.sh dev start --safe` and server port **8001**. Changing the binding briefly recreates affected containers while preserving data and web credentials; subsequent starts retain the choice.
+
+### 2. On the computer running your browser
+
+Open a new local PowerShell window on Windows, or a local terminal on macOS/Linux. Do not run this in the remote server shell. Check `ssh -V`; if missing on Windows, install the OpenSSH Client optional feature.
+
+Replace `user` with the server's Linux login, `server` with its address, and `22` with its SSH port. Run this as one line:
+
+```bash
+ssh -N -T -o ExitOnForwardFailure=yes -L 127.0.0.1:18000:127.0.0.1:8000 -p 22 user@server
+```
+
+Verify the host key fingerprint before accepting a new host. Authenticate with your SSH credentials, not the web password; add `-i "path/to/private-key"` if needed. A connected terminal remaining idle is normal. Keep it open and visit **http://127.0.0.1:18000** in a browser on the same computer. Sign in with the phone's web credentials.
+
+Here, `18000` is your local entry port and `8000` is the destination on the server. If you started with `--port 19000`, replace destination port `8000` with `19000`, including in saved `LocalForward` settings. If your local port is busy, change the first port and the browser URL to 18080. For dev mode, change only the destination port to 8001.
+
+Browsers treat loopback origins as potentially trustworthy, while SSH encrypts the connection between computers; this route usually needs no separate HTTPS certificate. Browser support for streaming features is still required. [Secure Contexts specification](https://www.w3.org/TR/secure-contexts/#is-origin-trustworthy)
+
+Press Ctrl+C to close the tunnel; the phone keeps running. Reconnect when needed, including after sleep or a network interruption.
+
+### 3. Optional saved connection
+
+Append this to the SSH config on your own computer: `~/.ssh/config` on macOS/Linux, or `%USERPROFILE%\.ssh\config` on Windows (no extension). Create the directory if necessary; preserve existing entries.
+
+```sshconfig
+Host yanyu-phone
+    HostName server
+    User user
+    Port 22
+    LocalForward 127.0.0.1:18000 127.0.0.1:8000
+    ExitOnForwardFailure yes
+    ServerAliveInterval 30
+    ServerAliveCountMax 3
+```
+
+Replace the address, username and SSH port, then connect with:
+
+```bash
+ssh -N -T yanyu-phone
+```
+
+Keepalive detects broken connections; it does not reconnect automatically. In a graphical SSH client, choose **Local forwarding**, local bind `127.0.0.1:18000`, destination `127.0.0.1:8000`, and the same SSH credentials. Do not use remote forwarding or a `0.0.0.0` local bind. [OpenSSH forwarding](https://man.openbsd.org/ssh), [client configuration](https://man.openbsd.org/ssh_config)
+
+### 4. Router configuration and troubleshooting
+
+- If SSH already works, reuse that address and port; no extra opening for 8000 or 18000 is needed.
+- For a home server with reachable public IPv4, a router rule can map external TCP 2222 to the host's fixed LAN address on port 22. Connect to the public address with `-p 2222`; the web service stays behind SSH. Allow the actual SSH port through the firewall, restricting source addresses where practical. Multiple routers may require multiple mappings; CGNAT generally requires another reachable network or relay arrangement.
+- `Address already in use`: change the first port, or close the old tunnel.
+- SSH timeout/refusal: check the address, SSH service and network rules.
+- `Permission denied`: check SSH credentials, not the web password.
+- `administratively prohibited`: ask the administrator to check `AllowTcpForwarding`, `DisableForwarding`, `PermitOpen`, and account/key restrictions. Local forwarding does not require enabling `GatewayPorts`. [Server configuration](https://man.openbsd.org/sshd_config)
+- A connected tunnel but an unreachable page: check `sudo ./android7-image.sh status` on the server and verify the destination port. `ExitOnForwardFailure` does not establish whether the destination web service is available.
+- A page without a phone picture: check Android health, the tunnel, browser support and `sudo ./android7-image.sh log`. Open the loopback URL on the computer running the tunnel; another device's `127.0.0.1` refers to that device.
+
+These are manual instructions. The phone scripts do not configure tunnels, SSH services or routers.
+
 ## Commands
 
 ```bash

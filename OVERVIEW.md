@@ -36,7 +36,7 @@ Android 发布 Dockerfile 只以 Android 基础镜像为基础，不复制网页
 
 ```mermaid
 flowchart LR
-    U[浏览器] --> P[宿主端口：image 8000 / dev 8001]
+    U[浏览器] --> P[默认宿主端口：image 8000 / dev 8001]
     P --> W[网页容器：登录、画面、控制]
     W -->|共享网络命名空间中的 ADB| A[Android 容器：KVM、模拟器、Houdini、Magisk]
     W --> WD[网页独立数据]
@@ -45,9 +45,9 @@ flowchart LR
 
 `write_compose` 是两种模式共同的配置生成器。两者采用相同的模拟器参数、环境变量、健康检查、共享网络、重启策略和启动依赖。网页通过 `network_mode: service:android7` 共享 Android 网络命名空间，并等待 Android 健康检查成功。
 
-开发模式追加 `build` 配置及 `patched/` 只读挂载，数据使用项目目录。镜像模式没有 `build` 配置，系统文件已内置，数据使用两个命名卷。只发布网页端口：image 为宿主 8000，dev 为宿主 8001，容器内均为 8000；ADB 不额外开放端口。默认 `public` 绑定 `0.0.0.0`；`start --safe` 绑定 `127.0.0.1`，`start --public` 恢复远程访问。选择按模式保存，后续启动复用；登录验证始终保留。
+开发模式追加 `build` 配置及 `patched/` 只读挂载，数据使用项目目录。镜像模式没有 `build` 配置，系统文件已内置，数据使用两个命名卷。只发布网页端口：默认 image 为宿主 8000，dev 为宿主 8001，可通过 `start --port PORT` 指定并保存其他端口，容器内均为 8000；ADB 不额外开放端口。默认 `public` 绑定 `0.0.0.0`；`start --safe` 绑定 `127.0.0.1`，`start --public` 恢复远程访问。选择按模式保存，后续启动复用；登录验证始终保留。
 
-image 容器名为 `yanyu-android7` 和 `yanyu-ws-scrcpy-web`；dev 使用 `yanyu-android7-dev` 和 `yanyu-ws-scrcpy-web-dev`。Compose 归属、数据位置和宿主端口独立，资源足够时两种模式可以同时运行。生命周期及 `purge` 操作仍检查 Compose 归属。旧 dev 名称从已有 `.android7.env` 读取，以便升级前管理和移除旧容器。
+image 容器名为 `yanyu-android7` 和 `yanyu-ws-scrcpy-web`；dev 使用 `yanyu-android7-dev` 和 `yanyu-ws-scrcpy-web-dev`。Compose 归属、数据位置和宿主端口独立，端口不冲突且资源足够时两种模式可以同时运行。生命周期及 `purge` 操作仍检查 Compose 归属。旧 dev 名称从已有 `.android7.env` 读取，以便升级前管理和移除旧容器。
 
 ## image 命令链
 

@@ -36,7 +36,7 @@ The Android release Dockerfile starts only from the Android base. It does not co
 
 ```mermaid
 flowchart LR
-    U[Browser] --> P[Host port: image 8000 / dev 8001]
+    U[Browser] --> P[Default host port: image 8000 / dev 8001]
     P --> W[Web container: authentication, streaming, control]
     W -->|ADB in shared network namespace| A[Android container: KVM, emulator, Houdini, Magisk]
     W --> WD[Independent web state]
@@ -45,9 +45,9 @@ flowchart LR
 
 `write_compose` generates both modes. Emulator parameters, environment, health checks, shared networking, restart policies and startup dependencies are identical. Web uses `network_mode: service:android7` and waits for Android's health check.
 
-Development adds build sections and read-only `patched/` mounts, and uses project directories for state. Image deployment has no build sections, embeds system files and uses two named volumes. Only the web port is published: host 8000 for image and 8001 for dev, both targeting container port 8000. No separate ADB port is exposed. The default `public` mode binds `0.0.0.0`; `start --safe` binds `127.0.0.1`, and `start --public` restores remote access. Each deployment saves its choice for later starts; sign-in remains required.
+Development adds build sections and read-only `patched/` mounts, and uses project directories for state. Image deployment has no build sections, embeds system files and uses two named volumes. Only the web port is published: host 8000 for image and 8001 for dev by default; `start --port PORT` selects and saves another host port, still targeting container port 8000. No separate ADB port is exposed. The default `public` mode binds `0.0.0.0`; `start --safe` binds `127.0.0.1`, and `start --public` restores remote access. Each deployment saves its choice for later starts; sign-in remains required.
 
-Image mode uses `yanyu-android7` and `yanyu-ws-scrcpy-web`; dev uses `yanyu-android7-dev` and `yanyu-ws-scrcpy-web-dev`. Compose ownership, state locations and host ports are separate, so both modes can run together with sufficient resources. Lifecycle and `purge` operations still check Compose ownership. Saved `.android7.env` names keep legacy dev containers manageable until they are removed and recreated.
+Image mode uses `yanyu-android7` and `yanyu-ws-scrcpy-web`; dev uses `yanyu-android7-dev` and `yanyu-ws-scrcpy-web-dev`. Compose ownership, state locations and host ports are separate, so both modes can run together with distinct host ports and sufficient resources. Lifecycle and `purge` operations still check Compose ownership. Saved `.android7.env` names keep legacy dev containers manageable until they are removed and recreated.
 
 ## Image command flow
 

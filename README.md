@@ -51,7 +51,7 @@ chmod +x android7.sh
 
 ## 独立的镜像部署脚本
 
-`android7-image.sh` 可单独交付，不依赖 `android7.sh`。它包含主脚本 `image` 的部署和管理功能，**不含构建、推送和迁移**。仍运行 Android + 网页两个容器，默认 8000 端口、允许远程连接且强制登录。
+`android7-image.sh` 可单独交付，不依赖 `android7.sh`。它包含主脚本 `image` 的部署和管理功能，**不含构建、推送和迁移**。仍运行 Android + 网页两个容器，默认 8000 端口（可用 `--port` 修改）、允许远程连接且强制登录。
 
 ```bash
 # 首次下载缺少的镜像并启动；pull 与 start 的行为相同
@@ -228,6 +228,105 @@ image 使用独立 Docker 数据卷 `yanyu-android7-data`、`yanyu-ws-scrcpy-dat
 ```
 
 访问模式分别保存在 `.android7-image.env` 和 `.android7.env`，之后不带选项的 `start` 会保留选择。未保存选择时默认 `public`。修改绑定需要执行 `start`，仅 `restart` 不会更新端口；重建相关容器会短暂中断连接，但保留应用和网页登录数据。`image pull` 同样支持这两个选项。
+
+### 自定义网页端口
+
+端口冲突时，用 `start --port PORT` 指定新的宿主机端口（整数 1～65535）。独立脚本、主脚本 image/dev 均支持；image 的 `pull` 也支持：
+
+```bash
+sudo ./android7-image.sh start --port 18000
+sudo ./android7-image.sh start --public --port 18000
+sudo ./android7.sh image start --port 18000
+sudo ./android7.sh dev start --port 18001
+```
+
+上面是各入口的示例，按自己使用的脚本选择一条。默认远程访问时，浏览器地址为 `http://服务器IP:18000`；服务器防火墙/安全组也需允许实际选择的端口。安全模式可组合使用 `start --safe --port 18000`。
+
+所选端口保存在该模式的配置中；后续 `start`、`pull`、`restart` 和 `reset` 会沿用它。要修改端口必须执行 `start --port 新端口`，`restart` 不接受该参数。内部网页端口仍是 8000，手机数据和网页登录密码保留，切换时连接会短暂中断。默认仍是 image 8000、dev 8001；两者同时运行时请选择不同端口。脚本不会停止占用端口的其他程序，Docker 报端口占用时换一个端口重试。
+
+## 安全模式启动与 SSH 隧道转发
+
+本章适用于从自己的电脑访问远程云手机。安全模式让网页只监听服务器的 `127.0.0.1`，再通过 SSH 把它转到自己电脑的本地端口。**服务器保留登录验证；外网只需能够连接 SSH 端口，无需开放云手机的 8000 端口。**
+
+### 1. 在云手机服务器上启用安全模式
+
+进入保存脚本的文件夹，执行：
+
+```bash
+cd "$HOME/android7-cloud"
+sudo ./android7-image.sh start --safe
+sudo ./android7-image.sh status
+sudo docker port yanyu-android7 8000/tcp
+```
+
+最后一条应显示 `127.0.0.1:8000`。若使用主脚本，对应命令是 `sudo ./android7.sh image start --safe`；开发模式使用 `sudo ./android7.sh dev start --safe`，服务器端口为 **8001**。修改访问方式会短暂重建相关容器，保留数据和网页登录密码；以后普通 `start` 会沿用安全模式。
+
+### 2. 在自己的电脑上建立隧道
+
+这是**运行浏览器的电脑**，不是刚才的服务器终端。Windows 打开新的 PowerShell 窗口，macOS/Linux 打开本机终端。先用 `ssh -V` 确认有 OpenSSH 客户端；Windows 缺少时安装系统“可选功能”中的 OpenSSH 客户端。
+
+将下列 `user` 换成服务器的 Linux 登录用户名，`server` 换成服务器 IP 或域名，`22` 换成实际 SSH 端口。以下是一整行命令，各系统均可使用：
+
+```bash
+ssh -N -T -o ExitOnForwardFailure=yes -L 127.0.0.1:18000:127.0.0.1:8000 -p 22 user@server
+```
+
+首次连接先核对服务器主机密钥指纹，再按提示确认；这里输入的是 **SSH 登录密码或密钥口令**，不是云手机网页密码。如果平时使用私钥登录，可在命令中增加 `-i "私钥文件路径"`。
+
+连接后终端没有新提示、一直停在那里是正常的。保持窗口打开，在**同一台电脑的浏览器**访问：
+
+```text
+http://127.0.0.1:18000
+```
+
+用 `admin` 和云手机网页密码登录，再点击 `connect`。传输路径是：
+
+```text
+自己的浏览器 → 自己电脑 127.0.0.1:18000
+            → SSH 加密连接 → 服务器 127.0.0.1:8000
+```
+
+`18000` 是自己电脑的入口，`8000` 是服务器的目标，两者不必相同。如果启动时用了 `--port 19000`，将隧道末尾的目标端口 `8000` 改成 `19000`，保存的 `LocalForward` 配置也一样。自己的 18000 被占用时，把第一个端口改成 18080，并打开 `http://127.0.0.1:18080`；开发模式只把末尾的目标端口改成 8001。
+
+通过本机回环地址访问，通常无需另外配置 HTTPS 证书：浏览器将回环来源视为潜在可信来源，跨机器的传输由 SSH 加密。仍需使用支持网页画面功能的浏览器。这与直接访问 `http://服务器IP:8000` 不同。[安全上下文规范](https://www.w3.org/TR/secure-contexts/#is-origin-trustworthy)
+
+按 **Ctrl+C** 或关闭隧道窗口会断开网页连接，但不会停止云手机。下次使用重新执行 SSH 命令。电脑睡眠、断网后也可能需要重连。
+
+### 3. 可选：保存设置，下次一条命令连接
+
+在**自己电脑**的 SSH 配置文件中追加下面内容，不要覆盖已有配置。macOS/Linux 文件为 `~/.ssh/config`；Windows 为 `%USERPROFILE%\.ssh\config`，没有扩展名，文件夹不存在时先创建。
+
+```sshconfig
+Host yanyu-phone
+    HostName server
+    User user
+    Port 22
+    LocalForward 127.0.0.1:18000 127.0.0.1:8000
+    ExitOnForwardFailure yes
+    ServerAliveInterval 30
+    ServerAliveCountMax 3
+```
+
+替换服务器地址、用户名和 SSH 端口后，以后运行：
+
+```bash
+ssh -N -T yanyu-phone
+```
+
+保活设置帮助发现连接中断，**不会自动重新连接**。若使用带界面的 SSH 工具，选择“本地转发 / Local”，本地监听 `127.0.0.1:18000`，远端目标 `127.0.0.1:8000`，再填写同样的 SSH 登录信息。不要选择远程转发，也不要把本地监听改成 `0.0.0.0`。[OpenSSH 转发说明](https://man.openbsd.org/ssh)、[客户端配置说明](https://man.openbsd.org/ssh_config)
+
+### 4. 路由器、安全组及常见问题
+
+- **已经能通过 SSH 登录服务器：**使用原来的地址和 SSH 端口即可，不需要再开放 8000 或 18000。
+- **服务器在家里，需要从外网连接：**有可达公网 IPv4 时，在路由器设置 TCP 转发，例如“外部 2222 → 云手机宿主机内网 IP 的 22”，并固定该内网 IP；SSH 命令使用公网地址和 `-p 2222`。这是转发 SSH，网页仍走隧道。防火墙需允许实际 SSH 端口，条件允许时限制来源地址。双层路由需要逐层处理；运营商共享公网地址（CGNAT）通常不能靠家中路由器一条规则打通，需要可达网络或中继方案。
+- **`Address already in use`：**自己的入口端口已被占用，改第一个端口，或关闭旧的隧道。
+- **`Connection timed out` / SSH `Connection refused`：**检查服务器地址、SSH 服务和 SSH 端口的网络放行；这是 SSH 连接问题。
+- **`Permission denied`：**检查 SSH 用户名、密码或私钥；不是云手机网页密码错误。
+- **`administratively prohibited`：**SSH 服务端禁止了转发，请管理员检查 `AllowTcpForwarding`、`DisableForwarding`、`PermitOpen` 以及账号或密钥限制；不必为本地转发打开 `GatewayPorts`。[服务端配置说明](https://man.openbsd.org/sshd_config)
+- **隧道连接后仍打不开网页 / `connect failed: Connection refused`：**在服务器执行 `sudo ./android7-image.sh status`，确认网页服务已启动，目标端口正确。`ExitOnForwardFailure` 只检查转发能否建立，不保证目标网页已经可用。
+- **网页能开但没有画面：**确认安卓健康状态、隧道窗口仍连接，并在开隧道的电脑上访问 `http://127.0.0.1:18000`；其他电脑或手机的 `127.0.0.1` 指向它们自己。查看 `sudo ./android7-image.sh log` 的错误信息。
+
+以上是手动配置教程；云手机脚本不会自动创建隧道、修改 SSH 服务或路由器设置。
 
 ## 命令
 
