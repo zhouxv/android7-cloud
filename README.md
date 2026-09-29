@@ -49,23 +49,62 @@ chmod +x android7.sh
 ./install-apk.sh -c yanyu-android7 /path/to/game.apk
 ```
 
-## 仅拉取远程镜像
+## 独立的镜像部署脚本
 
-独立的 `android7-image.sh` **只下载 Android 和网页两个镜像**，不构建、不推送、不创建或启动容器，也不生成数据卷或配置文件。无需 `android7.sh`、Compose 或 KVM，下载时只需要 Docker 和仓库网络连接。
-
-```bash
-chmod +x android7-image.sh
-./android7-image.sh
-# 当前用户没有 Docker 权限时使用 sudo ./android7-image.sh
-```
-
-默认拉取上表中的 `1.1-android` 和 `1.1-web`。每次均向远程仓库执行 `docker pull`，本地已有镜像也会检查标签更新，未变化的层由 Docker 复用；固定平台为 `linux/amd64`，不强制镜像摘要。可以指定另一对远程镜像：
+`android7-image.sh` 可单独交付，不依赖 `android7.sh`。它包含主脚本 `image` 的部署和管理功能，**不含构建、推送和迁移**。仍运行 Android + 网页两个容器，默认 8000 端口、允许远程连接且强制登录。
 
 ```bash
-./android7-image.sh myrepo/phone:1.2-android myrepo/phone:1.2-web
+# 首次下载缺少的镜像并启动；pull 与 start 的行为相同
+sudo ./android7-image.sh start
+sudo ./android7-image.sh status
+
+# 如果只想下载，不启动
+sudo ./android7-image.sh download
 ```
 
-任一拉取失败会返回非零退出码，已经下载的镜像保留；拉取不会更新正在运行的容器。私有仓库需先以相同用户执行 `docker login`。注意原来的 `android7.sh image pull` 会自动启动云手机；**只想下载时使用 `android7-image.sh`**。
+**新脚本需要子命令。** 直接执行 `./android7-image.sh` 会显示帮助。`start` / `pull` 优先复用本地镜像，仅拉取缺失镜像；`download` 每次向远程仓库检查两个标签，不创建或启动容器，也不更改已保存的部署配置。
+
+| 命令 | 用途 |
+| --- | --- |
+| `start` / `pull` | 拉取缺少的镜像，准备登录密码，启动双容器 |
+| `download` | 仅拉取两个远程镜像，固定下载 `linux/amd64` 平台 |
+| `status` / `log` | 查看状态 / 持续查看日志，Ctrl+C 只退出日志查看 |
+| `stop` / `restart` | 停止 / 重启；保留数据 |
+| `down` | 移除容器和网络，保留两个数据卷 |
+| `password` | 隐藏输入新密码两次，修改或重置 admin 密码，并撤销旧会话 |
+| `reset` | 输入 YES 后重置安卓并重新启动，保留网页登录账号和密码 |
+| `purge` | 输入 YES 后删除容器及全部安卓、网页登录数据；保留镜像，不重启 |
+| `help` | 查看帮助 |
+
+首次启动生成并显示一次独立的 32 位复杂密码，已有密码不会被覆盖。密码会在开放网页端口前初始化，兼容现有双容器镜像。忘记或错过密码时，保持服务运行后执行 `sudo ./android7-image.sh password`。
+
+```bash
+# 安全模式只允许本机连接；恢复默认远程连接
+sudo ./android7-image.sh start --safe
+sudo ./android7-image.sh start --public
+
+# 自定义镜像必须成对提供；启动后记住这两个标签
+sudo ./android7-image.sh start myrepo/phone:1.2-android myrepo/phone:1.2-web
+
+# 仅下载自定义版本；之后 start 也要明确传入这一对标签才会切换
+sudo ./android7-image.sh download myrepo/phone:1.2-android myrepo/phone:1.2-web
+```
+
+登录验证与访问范围是两件事。远程画面传输可能需要 HTTPS 入口；脚本不配置反向代理、隧道或端口转发。
+
+独立脚本与主脚本在**同一文件夹**使用同一份 `.android7-image.env`、`compose.image.yml`、容器名和数据卷，主脚本创建的 image 部署可以直接管理。不要把配置文件丢掉，也不要同时运行两个管理脚本；新脚本会阻止本目录内多个自身修改操作并发。配置及目录不匹配、其他容器占用数据卷时，会拒绝相关操作。
+
+如果已按旧 PDF 的 `docker run` 命令创建容器，新脚本不会静默接管。先确认这两个容器确实是本项目的手动部署，且 `/data` 分别使用 `yanyu-android7-data`、`yanyu-ws-scrcpy-data`，再执行一次：
+
+```bash
+sudo docker inspect -f '{{range .Mounts}}{{println .Destination .Name}}{{end}}' yanyu-android7 yanyu-ws-scrcpy-web
+# 确认上述数据卷名称与说明一致后再执行；仅移除容器，保留数据卷
+sudo docker stop yanyu-ws-scrcpy-web yanyu-android7
+sudo docker rm yanyu-ws-scrcpy-web yanyu-android7
+sudo ./android7-image.sh start
+```
+
+如果名称或挂载不同，先用原部署方式管理，不要删除或覆盖它的数据。`download` 失败会保留已经拉取的内容；私有仓库请用与脚本相同的 Docker 用户完成 `docker login`。
 
 ## 宿主机检查与依赖安装
 

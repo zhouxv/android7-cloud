@@ -4,6 +4,9 @@
 
 Both `image` and `dev` run separate Android and web containers. Image acquisition and storage differ; there is no combined-service build or single-container startup path.
 
+
+For standalone delivery, `android7-image.sh` embeds the image-mode two-container deployment, credential initialization and lifecycle management without depending on the main script. Builds and migrations remain in `android7.sh`. `start` / `pull` fetch missing images and start services; `download` only checks and downloads remote images.
+
 ## Build pipeline
 
 ```mermaid

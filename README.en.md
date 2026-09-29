@@ -49,23 +49,62 @@ Open `http://localhost:8000` locally or `http://<server-ip>:8000` remotely, sign
 ./install-apk.sh -c yanyu-android7 /path/to/game.apk
 ```
 
-## Pull remote images only
+## Standalone image deployment script
 
-The standalone `android7-image.sh` **only downloads the Android and web images**. It does not build, push, create/start containers, or generate volumes/configuration. It needs Docker and registry connectivity, but does not depend on `android7.sh`, Compose or KVM.
-
-```bash
-chmod +x android7-image.sh
-./android7-image.sh
-# Use sudo ./android7-image.sh if Docker access requires elevated permissions
-```
-
-Defaults are the `1.1-android` and `1.1-web` tags above. Every invocation runs `docker pull` against the registry, including for locally cached tags; Docker reuses unchanged layers. The platform is `linux/amd64`, without required image digests. To download another pair:
+`android7-image.sh` can be delivered on its own, without `android7.sh`. It provides the main script's `image` deployment/lifecycle features, **excluding builds, publishing and migrations**. Android and web remain separate containers, with port 8000, public binding by default and sign-in required.
 
 ```bash
-./android7-image.sh myrepo/phone:1.2-android myrepo/phone:1.2-web
+# Pull missing images and start; pull is an alias of start
+sudo ./android7-image.sh start
+sudo ./android7-image.sh status
+
+# Download only, without starting
+sudo ./android7-image.sh download
 ```
 
-Either pull failing returns a nonzero exit code; already downloaded images are retained. Running containers are not updated. For private registries, run `docker login` under the same user first. The original `android7.sh image pull` also starts the phone; **use `android7-image.sh` when you only want to download images**.
+**A subcommand is now required.** Running `./android7-image.sh` without arguments shows help. `start` / `pull` reuse local images and pull only missing ones. `download` always checks both remote tags without creating/starting containers or changing saved deployment settings.
+
+| Command | Behavior |
+| --- | --- |
+| `start` / `pull` | Fetch missing images, initialize credentials, start both containers |
+| `download` | Pull both remote images for `linux/amd64` only |
+| `status` / `log` | Show state / follow logs; Ctrl+C exits the viewer only |
+| `stop` / `restart` | Stop / restart, retaining data |
+| `down` | Remove containers/network, retaining both volumes |
+| `password` | Hidden entry/confirmation to change/reset admin password and revoke old sessions |
+| `reset` | After YES, reset Android and restart, retaining web accounts/passwords |
+| `purge` | After YES, delete containers and ALL Android/web data; retain images; do not restart |
+| `help` | Show help |
+
+First startup prints a unique 32-character complex password once; existing passwords are preserved. Credentials initialize before publishing the web port and work with existing two-container releases. To recover/change a password while the service is running, use `sudo ./android7-image.sh password`.
+
+```bash
+# Localhost only / restore public access
+sudo ./android7-image.sh start --safe
+sudo ./android7-image.sh start --public
+
+# Select and remember a custom pair
+sudo ./android7-image.sh start myrepo/phone:1.2-android myrepo/phone:1.2-web
+
+# Download only; pass these tags explicitly to start to switch deployments
+sudo ./android7-image.sh download myrepo/phone:1.2-android myrepo/phone:1.2-web
+```
+
+Authentication and network binding are separate settings. Remote screen streaming may require an HTTPS endpoint; the script configures no reverse proxy, tunnel or forwarding.
+
+In the **same directory**, both scripts share `.android7-image.env`, `compose.image.yml`, container names and volumes. Existing main-script image deployments remain manageable. Retain the configuration files and do not run both managers concurrently; the standalone script locks its own mutating operations per directory. It rejects mismatched ownership/configuration and external volume references where applicable.
+
+Containers created manually with `docker run` in the older PDF are not silently adopted. First verify these are your manual cloud-phone containers and that their `/data` mounts use `yanyu-android7-data` and `yanyu-ws-scrcpy-data` respectively, then run once:
+
+```bash
+sudo docker inspect -f '{{range .Mounts}}{{println .Destination .Name}}{{end}}' yanyu-android7 yanyu-ws-scrcpy-web
+# Only after confirming the expected volumes; remove containers, keep volumes
+sudo docker stop yanyu-ws-scrcpy-web yanyu-android7
+sudo docker rm yanyu-ws-scrcpy-web yanyu-android7
+sudo ./android7-image.sh start
+```
+
+For different names/mounts, use the original deployment manager rather than deleting/overwriting data. Failed downloads retain images already fetched. Authenticate to private registries using the same Docker user as the script.
 
 ## Host checks and dependency installation
 
