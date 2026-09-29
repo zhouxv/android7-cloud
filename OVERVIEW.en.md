@@ -33,7 +33,7 @@ The Android release Dockerfile starts only from the Android base. It does not co
 
 ```mermaid
 flowchart LR
-    U[Browser] --> P[Host-local port 8000]
+    U[Browser] --> P[Host port: image 8000 / dev 8001]
     P --> W[Web container: authentication, streaming, control]
     W -->|ADB in shared network namespace| A[Android container: KVM, emulator, Houdini, Magisk]
     W --> WD[Independent web state]
@@ -42,9 +42,9 @@ flowchart LR
 
 `write_compose` generates both modes. Emulator parameters, environment, health checks, shared networking, restart policies and startup dependencies are identical. Web uses `network_mode: service:android7` and waits for Android's health check.
 
-Development adds build sections and read-only `patched/` mounts, and uses project directories for state. Image deployment has no build sections, embeds system files and uses two named volumes. Only host-local port 8000 is published; no separate ADB port is exposed.
+Development adds build sections and read-only `patched/` mounts, and uses project directories for state. Image deployment has no build sections, embeds system files and uses two named volumes. Only the web port is published: host 8000 for image and 8001 for dev, both targeting container port 8000. No separate ADB port is exposed. The default `public` mode binds `0.0.0.0`; `start --safe` binds `127.0.0.1`, and `start --public` restores remote access. Each deployment saves its choice for later starts; sign-in remains required.
 
-Image mode uses `yanyu-android7` and `yanyu-ws-scrcpy-web`; dev uses `yanyu-android7-dev` and `yanyu-ws-scrcpy-web-dev`. Compose ownership and state locations remain separate, but both modes use port 8000: stop or remove the other deployment before switching. Lifecycle and `purge` operations still check Compose ownership. Saved `.android7.env` names keep legacy dev containers manageable until they are removed and recreated.
+Image mode uses `yanyu-android7` and `yanyu-ws-scrcpy-web`; dev uses `yanyu-android7-dev` and `yanyu-ws-scrcpy-web-dev`. Compose ownership, state locations and host ports are separate, so both modes can run together with sufficient resources. Lifecycle and `purge` operations still check Compose ownership. Saved `.android7.env` names keep legacy dev containers manageable until they are removed and recreated.
 
 ## Image command flow
 
@@ -54,16 +54,21 @@ Image mode uses `yanyu-android7` and `yanyu-ws-scrcpy-web`; dev uses `yanyu-andr
 2. Check Docker, Compose and KVM; refuse to take over an unmigrated combined container.
 3. Pull missing images and check `cloudphone.component` labels for `android` and `web`, rejecting old combined images in either role.
 4. Save both references and generate deployment Compose.
-5. Run `up -d --no-build --pull never` so deployment cannot unexpectedly build or repull images.
+5. Initialize web credentials: retain existing passwords; create fresh databases using a temporary web container without published ports, then store the random initial password using native scrypt hashing.
+6. Run `up -d --no-build --pull never` so deployment cannot unexpectedly build or repull images.
 
 `image stop/restart/down/log/status` use Compose project `android7-image`. `purge` confirms intent, stops/removes both containers, checks both volumes for references from other containers, then deletes both volumes without restarting.
+
+After successful startup, print the initial password once and remove its temporary mode-`0600` handoff file. New web images also generate passwords after native database initialization for manual Docker deployments. `image password` / `dev password` receive hidden input through stdin, then transactionally update the scrypt hash, clear lockouts and revoke old sessions without touching Android data.
 
 ## State and migration
 
 | Mode | Android state | Web state |
 | --- | --- | --- |
 | image | `yanyu-android7-data → /data` | `yanyu-ws-scrcpy-data → /data` |
-| dev | `docker-state/ → /data` | `ws-scrcpy-data/ → /data` |
+| dev | `docker-state-dev/ → /data` | `ws-scrcpy-data-dev/ → /data` |
+
+`data migrate` stops involved containers, checks for other running references, then uses a temporary container from a local runtime image to run `cp -a --sparse=always`. Source mounts are read-only and targets must be empty. Android and web state are copied; host port/access settings are not. A pending marker blocks incomplete copies from starting. `dev migrate` upgrades legacy directories to the new `-dev` paths while retaining the source as a backup.
 
 The web database is now `/data/wsscrcpy.db` in the web container. The old combined container used `/data/web/wsscrcpy.db`. Migration therefore copies the web subtree after stopping the old container, reinitializing program dependencies while retaining the database/accounts. README contains complete migration and rollback instructions.
 

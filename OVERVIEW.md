@@ -33,7 +33,7 @@ Android 发布 Dockerfile 只以 Android 基础镜像为基础，不复制网页
 
 ```mermaid
 flowchart LR
-    U[浏览器] --> P[本机 8000 端口]
+    U[浏览器] --> P[宿主端口：image 8000 / dev 8001]
     P --> W[网页容器：登录、画面、控制]
     W -->|共享网络命名空间中的 ADB| A[Android 容器：KVM、模拟器、Houdini、Magisk]
     W --> WD[网页独立数据]
@@ -42,9 +42,9 @@ flowchart LR
 
 `write_compose` 是两种模式共同的配置生成器。两者采用相同的模拟器参数、环境变量、健康检查、共享网络、重启策略和启动依赖。网页通过 `network_mode: service:android7` 共享 Android 网络命名空间，并等待 Android 健康检查成功。
 
-开发模式追加 `build` 配置及 `patched/` 只读挂载，数据使用项目目录。镜像模式没有 `build` 配置，系统文件已内置，数据使用两个命名卷。只有宿主本地 8000 被发布，ADB 不额外开放端口。
+开发模式追加 `build` 配置及 `patched/` 只读挂载，数据使用项目目录。镜像模式没有 `build` 配置，系统文件已内置，数据使用两个命名卷。只发布网页端口：image 为宿主 8000，dev 为宿主 8001，容器内均为 8000；ADB 不额外开放端口。默认 `public` 绑定 `0.0.0.0`；`start --safe` 绑定 `127.0.0.1`，`start --public` 恢复远程访问。选择按模式保存，后续启动复用；登录验证始终保留。
 
-image 容器名为 `yanyu-android7` 和 `yanyu-ws-scrcpy-web`；dev 使用 `yanyu-android7-dev` 和 `yanyu-ws-scrcpy-web-dev`。Compose 归属与数据位置独立，但两种模式使用相同的 8000 端口，切换前需停止或移除另一种模式的容器。生命周期及 `purge` 操作仍检查 Compose 归属。旧 dev 名称从已有 `.android7.env` 读取，以便升级前管理和移除旧容器。
+image 容器名为 `yanyu-android7` 和 `yanyu-ws-scrcpy-web`；dev 使用 `yanyu-android7-dev` 和 `yanyu-ws-scrcpy-web-dev`。Compose 归属、数据位置和宿主端口独立，资源足够时两种模式可以同时运行。生命周期及 `purge` 操作仍检查 Compose 归属。旧 dev 名称从已有 `.android7.env` 读取，以便升级前管理和移除旧容器。
 
 ## image 命令链
 
@@ -54,16 +54,21 @@ image 容器名为 `yanyu-android7` 和 `yanyu-ws-scrcpy-web`；dev 使用 `yany
 2. 检查 Docker、Compose 和 KVM，拒绝直接接管未迁移的旧单容器。
 3. 本地缺少镜像时才拉取；检查 `cloudphone.component` 标签分别为 `android`、`web`，避免把旧合并镜像用错位置。
 4. 保存两个引用并生成镜像模式 Compose。
-5. 运行 `up -d --no-build --pull never`，确保部署阶段不意外构建或再次拉取。
+5. 使用网页数据初始化密码：已有密码保留；新数据库由不发布端口的临时网页容器创建，再写入随机初始密码的原生 scrypt 哈希。
+6. 运行 `up -d --no-build --pull never`，确保部署阶段不意外构建或再次拉取。
 
 `image stop/restart/down/log/status` 统一调用独立项目 `android7-image` 的 Compose。`purge` 先确认、停止并删除两个容器，再检查两个卷是否仍被其他容器引用，最后删除两个数据卷；不自动重启。
+
+启动成功后一次性输出初始密码并删除权限为 `0600` 的临时交付文件。新构建的网页镜像也在原生数据库初始化后生成密码，支持手动 Docker 部署。`image password` / `dev password` 通过标准输入接收隐藏输入，在事务内更新 scrypt 哈希、清除登录锁定并撤销旧会话；不修改 Android 数据。
 
 ## 数据和迁移
 
 | 模式 | Android 数据 | 网页数据 |
 | --- | --- | --- |
 | image | `yanyu-android7-data → /data` | `yanyu-ws-scrcpy-data → /data` |
-| dev | `docker-state/ → /data` | `ws-scrcpy-data/ → /data` |
+| dev | `docker-state-dev/ → /data` | `ws-scrcpy-data-dev/ → /data` |
+
+`data migrate` 在停止相关容器并检查无其他运行中引用后，使用本地运行镜像的临时容器执行 `cp -a --sparse=always`，源挂载只读，目标必须为空。复制 Android 和网页数据，但不复制端口及访问模式配置。中断标记阻止不完整副本启动。`dev migrate` 是旧目录到新 `-dev` 目录的迁移别名，源目录保留为备份。
 
 网页数据库现在位于网页容器的 `/data/wsscrcpy.db`。旧单容器使用 `/data/web/wsscrcpy.db`，因此迁移需要在停止旧容器后复制网页子目录，重新初始化程序依赖，同时保留数据库和账号。完整操作和回滚步骤见 README。
 

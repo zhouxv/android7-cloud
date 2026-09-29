@@ -40,7 +40,8 @@ PATCHED_DIR="${BASE_DIR}/patched"
 SRC_DIR="${BASE_DIR}/src"
 
 DOCKER_DIR="${BASE_DIR}/docker"
-STATE_DIR="${BASE_DIR}/docker-state"
+STATE_DIR="${BASE_DIR}/docker-state-dev"
+WEB_STATE_DIR="${BASE_DIR}/ws-scrcpy-data-dev"
 
 COMPOSE_FILE="${BASE_DIR}/compose.android7.yml"
 ENV_FILE="${BASE_DIR}/.android7.env"
@@ -698,7 +699,7 @@ ENTRYPOINT ["/usr/local/bin/tini", "-g", "--", "/opt/android/web-seed-entrypoint
 CMD ["/app/start.sh"]
 COPY web-reconnect-patch.cjs /tmp/android7-web-reconnect-patch.cjs
 RUN node /tmp/android7-web-reconnect-patch.cjs && rm /tmp/android7-web-reconnect-patch.cjs
-COPY android7-auth.cjs android7-setup.html /app/dist/
+COPY android7-auth.cjs android7-password.cjs android7-setup.html /app/dist/
 COPY web-auth-patch.cjs /tmp/android7-web-auth-patch.cjs
 RUN node /tmp/android7-web-auth-patch.cjs && rm /tmp/android7-web-auth-patch.cjs
 # The pinned web base already includes tzdata; configure both libc and app timezone.
@@ -799,11 +800,119 @@ fs.writeFileSync(`${root}/index.html`, index);
 EOF
 }
 
-# Native session authentication, enabled once for both new and legacy installs.
-# Only the original passwordless admin may use the one-time setup endpoint.
-# Generate first-visit password setup and auth patches; enable login by default, preserve passwords and reuse upstream hashing/sessions.
+# Emit the password helper used by both deployment commands and future web images.
+# Match the pinned upstream scrypt format; never put plaintext passwords in image layers.
+web_password_script()
+{
+    cat <<'EOF'
+const fs = require('node:fs');
+const crypto = require('node:crypto');
+const secretFile = '/data/.android7-initial-password';
+function generatePassword() {
+    let password;
+    do { password = crypto.randomBytes(24).toString('base64url'); }
+    while (!/[A-Z]/.test(password) || !/[a-z]/.test(password) || !/[0-9]/.test(password) || !/[-_]/.test(password));
+    return password;
+}
+function hashPassword(password) {
+    const salt = crypto.randomBytes(16);
+    const hash = crypto.scryptSync(password, salt, 64, {N:16384,r:8,p:1});
+    return `scrypt$16384$8$1$${salt.toString('base64')}$${hash.toString('base64')}`;
+}
+function matches(password, encoded) {
+    if (!encoded) return false;
+    const parts = encoded.split('$');
+    if (parts.length !== 6 || parts[0] !== 'scrypt') return false;
+    const expected = Buffer.from(parts[5], 'base64');
+    const actual = crypto.scryptSync(password, Buffer.from(parts[4], 'base64'), expected.length,
+        {N:Number(parts[1]),r:Number(parts[2]),p:Number(parts[3])});
+    return crypto.timingSafeEqual(actual, expected);
+}
+function setSetting(db, key, value) {
+    db.prepare('INSERT INTO app_settings (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
+        .run(key, JSON.stringify(value));
+}
+function initializeDatabase(db) {
+    db.exec('BEGIN IMMEDIATE');
+    try {
+        const users = db.prepare('SELECT * FROM users').all();
+        const user = users[0];
+        const fresh = users.length === 1 && user.id === 1 && user.username === 'admin'
+            && user.role === 'admin' && !user.disabled && user.password_hash === null;
+        if (fresh) {
+            // Save before committing the hash so interrupted startup can recover the same password.
+            let password;
+            try {
+                password = generatePassword();
+                fs.writeFileSync(secretFile, password, {mode:0o600,flag:'wx'});
+            } catch (error) {
+                if (error.code !== 'EEXIST') throw error;
+                password = fs.readFileSync(secretFile, 'utf8');
+                if (password.length < 8 || password.length > 128) throw new Error('Invalid initial password file');
+            }
+            db.prepare('UPDATE users SET password_hash=? WHERE id=1').run(hashPassword(password));
+            db.prepare('DELETE FROM sessions WHERE user_id=1').run();
+            setSetting(db, 'authEnabled', true);
+            setSetting(db, 'android7PasswordSetupRequired', false);
+            setSetting(db, 'android7AuthInitialized', true);
+        } else if (db.prepare('SELECT value FROM app_settings WHERE key=?').get('android7AuthInitialized')?.value !== 'true') {
+            setSetting(db, 'authEnabled', true);
+            setSetting(db, 'android7PasswordSetupRequired', false);
+            setSetting(db, 'android7AuthInitialized', true);
+        }
+        db.exec('COMMIT');
+    } catch (error) { db.exec('ROLLBACK'); throw error; }
+}
+function main(action) {
+    if (!['init','show','change'].includes(action)) throw new Error('Unknown password operation');
+    if (!fs.existsSync('/data/wsscrcpy.db')) { process.exitCode=75; return; }
+    const {DatabaseSync} = require('node:sqlite');
+    const db = new DatabaseSync('/data/wsscrcpy.db');
+    try {
+        db.exec('PRAGMA busy_timeout=5000');
+        const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(row=>row.name);
+        if (!['users','sessions','app_settings'].every(name=>tables.includes(name))) { process.exitCode=75; return; }
+        if (action === 'init') { initializeDatabase(db); return; }
+        if (action === 'show' && !fs.existsSync(secretFile)) return;
+        const user = db.prepare("SELECT * FROM users WHERE username='admin'").get();
+        if (!user || user.role !== 'admin' || user.disabled) throw new Error('Enabled admin account not found');
+        if (action === 'show') {
+            if (!fs.existsSync(secretFile)) return;
+            const password = fs.readFileSync(secretFile, 'utf8');
+            if (matches(password,user.password_hash)) {
+                console.log('Web username: admin');
+                console.log(`Initial web password: ${password}`);
+                console.log('Save this password. It is displayed once; use the password command to reset it.');
+            }
+            fs.unlinkSync(secretFile);
+            return;
+        }
+        const password = fs.readFileSync(0,'utf8');
+        if (password.length < 8 || password.length > 128) throw new Error('Use 8-128 characters');
+        const hash = hashPassword(password);
+        db.exec('BEGIN IMMEDIATE');
+        try {
+            db.prepare('UPDATE users SET password_hash=?,failed_attempts=0,lockout_window_start=NULL,locked_until=NULL WHERE id=?').run(hash,user.id);
+            db.prepare('DELETE FROM sessions WHERE user_id=?').run(user.id);
+            setSetting(db,'authEnabled',true);
+            setSetting(db,'android7PasswordSetupRequired',false);
+            setSetting(db,'android7AuthInitialized',true);
+            db.exec('COMMIT');
+        } catch (error) { db.exec('ROLLBACK'); throw error; }
+        fs.rmSync(secretFile,{force:true});
+        console.log('Admin password changed. Previous sessions were signed out.');
+    } finally { db.close(); }
+}
+module.exports = {initializeDatabase};
+if (require.main === module) main(process.argv[2]);
+EOF
+}
+
+# Generate native auth integration and random first-start passwords.
+# Retain the legacy setup endpoint only for compatibility; initialized accounts cannot reuse it.
 write_web_auth()
 {
+    web_password_script > "${DOCKER_DIR}/android7-password.cjs" || return 1
     cat > "${DOCKER_DIR}/web-auth-patch.cjs" <<'EOF'
 const fs = require('node:fs');
 const file = '/app/dist/index.js';
@@ -834,19 +943,9 @@ function isOriginalPasswordlessAdmin(db) {
     return users.length === 1 && users[0].id === 1 && users[0].username === 'admin'
         && users[0].role === 'admin' && !users[0].disabled && users[0].passwordHash === null;
 }
-// Enable auth transactionally on first migration; subsequent boots preserve user settings.
+// Generate a unique initial password before serving HTTP; preserve existing accounts.
 function initialize(db) {
-    if (db.appSettings.get(INITIALIZED) === true) return;
-    db.sqlite.exec('BEGIN IMMEDIATE');
-    try {
-        db.appSettings.set('authEnabled', true);
-        db.appSettings.set(SETUP_REQUIRED, isOriginalPasswordlessAdmin(db));
-        db.appSettings.set(INITIALIZED, true);
-        db.sqlite.exec('COMMIT');
-    } catch (error) {
-        db.sqlite.exec('ROLLBACK');
-        throw error;
-    }
+    require('./android7-password.cjs').initializeDatabase(db.sqlite);
 }
 // Check both the persisted marker and account state to prevent reclaiming an admin.
 function needsSetup(db) {
@@ -1184,6 +1283,14 @@ AVDCONFIG
 
 create_avd
 
+# Initialize language only for new userdata, including after a factory reset.
+# Keep a pending marker across interrupted boots; existing user choices survive restarts.
+LOCALE_PENDING="${AVD_DIR}/.locale-setup-pending"
+if [ ! -e "${AVD_DIR}/userdata-qemu.img" ] &&
+   [ ! -e "${AVD_DIR}/userdata-qemu.img.qcow2" ]; then
+    touch "${LOCALE_PENDING}" || exit 1
+fi
+
 
 # ============================================================
 # ADB
@@ -1365,62 +1472,91 @@ fi
 # Wait for boot
 # ============================================================
 
-info "Waiting for Android boot"
+# Wait again after first-boot language setup restarts Android framework services.
+wait_for_boot()
+{
+    info "Waiting for Android boot"
 
-elapsed=0
+    local elapsed=0 boot
 
-while [ "${elapsed}" -lt "${BOOT_TIMEOUT}" ]
-do
+    while [ "${elapsed}" -lt "${BOOT_TIMEOUT}" ]
+    do
 
-    boot="$(
-        adb \
-            -s "${ANDROID_SERIAL}" \
-            shell \
-            getprop \
-            sys.boot_completed \
-            2>/dev/null |
-        tr -d '\r'
-    )"
+        boot="$(
+            adb \
+                -s "${ANDROID_SERIAL}" \
+                shell \
+                getprop \
+                sys.boot_completed \
+                2>/dev/null |
+            tr -d '\r'
+        )"
 
-    if [ "${boot}" = "1" ]; then
+        if [ "${boot}" = "1" ]; then
 
-        ok "Android boot completed"
+            ok "Android boot completed"
 
-        break
+            break
+
+        fi
+
+        if ! kill -0 "${EMU_PID}" \
+            >/dev/null 2>&1
+        then
+
+            fail "Emulator exited during Android boot."
+
+            tail -n 150 "${LOG_FILE}" || true
+
+            return 1
+
+        fi
+
+        if [ $((elapsed % 10)) -eq 0 ]; then
+
+            echo "[WAIT] Android boot ${elapsed}s"
+
+        fi
+
+        sleep 2
+
+        elapsed=$((elapsed + 2))
+
+    done
+
+
+    if [ "${elapsed}" -ge "${BOOT_TIMEOUT}" ]; then
+
+        fail "Android boot timeout."
+
+        return 1
 
     fi
+    return 0
+}
 
-    if ! kill -0 "${EMU_PID}" \
-        >/dev/null 2>&1
-    then
+wait_for_boot || exit 1
 
-        fail "Emulator exited during Android boot."
-
-        tail -n 150 "${LOG_FILE}" || true
-
+# Android 7 needs both the stored locale list and the persistent locale property.
+# Let SettingsProvider flush its asynchronous write before restarting the framework
+# once so system UI and apps load the selected resources.
+# Existing userdata is never changed unless an earlier initialization was interrupted.
+if [ -f "${LOCALE_PENDING}" ]; then
+    info "Setting default language: Simplified Chinese (China)"
+    adb -s "${ANDROID_SERIAL}" shell /system/xbin/su 0 sh -c \
+        "'settings put system system_locales zh-Hans-CN &&
+          sleep 2 &&
+          setprop persist.sys.locale zh-Hans-CN &&
+          setprop sys.boot_completed 0 && stop && start'" || exit 1
+    wait_for_boot || exit 1
+    locale="$(adb -s "${ANDROID_SERIAL}" shell getprop persist.sys.locale | tr -d '\r')"
+    locales="$(adb -s "${ANDROID_SERIAL}" shell settings get system system_locales | tr -d '\r')"
+    if [ "$locale" != zh-Hans-CN ] || [ "$locales" != zh-Hans-CN ]; then
+        fail "Default language initialization failed; the next boot will retry."
         exit 1
-
     fi
-
-    if [ $((elapsed % 10)) -eq 0 ]; then
-
-        echo "[WAIT] Android boot ${elapsed}s"
-
-    fi
-
-    sleep 2
-
-    elapsed=$((elapsed + 2))
-
-done
-
-
-if [ "${elapsed}" -ge "${BOOT_TIMEOUT}" ]; then
-
-    fail "Android boot timeout."
-
-    exit 1
-
+    rm -f "${LOCALE_PENDING}" || exit 1
+    ok "Default language initialized: zh-Hans-CN"
 fi
 
 
@@ -1720,7 +1856,120 @@ EOF
 # Compose file
 # ============================================================
 
-# Generate both modes from one topology; only build instructions and storage differ.
+# Initialize passwords before publishing any port, including with older release images.
+# Fresh databases are created by the native web service in an isolated bootstrap container.
+prepare_web_password()
+(
+    local mode="$1" config="$ENV_FILE" mount image js rc bootstrap='' bootstrap_created=0 attempt
+    if [ "$mode" = image ]; then config="$IMAGE_ENV_FILE"; fi
+    image="$(sed -n 's/^WEB_IMAGE=//p' "$config")"
+    [ -n "$image" ] || { fail "Missing web image configuration."; return 1; }
+    if [ "$mode" = image ]; then
+        local volume
+        volume="$(sed -n 's/^WEB_VOLUME=//p' "$config")"
+        [[ "$volume" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || return 1
+        docker_cmd volume create "$volume" >/dev/null || return 1
+        mount="type=volume,src=$volume,dst=/data"
+    else
+        [ ! -L "$WEB_STATE_DIR" ] || return 1
+        mkdir -p "$WEB_STATE_DIR" || return 1
+        mount="type=bind,src=$WEB_STATE_DIR,dst=/data"
+    fi
+    js="$(web_password_script)
+main(process.argv[1]);"
+    docker_cmd run --rm --pull never --network none --user 1000:1000 -e NODE_NO_WARNINGS=1 \
+        --entrypoint node --mount "$mount" "$image" -e "$js" init
+    rc=$?
+    if [ "$rc" = 0 ]; then return 0; fi
+    if [ "$rc" != 75 ]; then return "$rc"; fi
+    info "Initializing web credentials before enabling network access"
+    bootstrap="android7-password-bootstrap-${mode}-$$"
+    trap 'if [ "$bootstrap_created" = 1 ]; then docker_cmd stop -t 15 "$bootstrap" >/dev/null 2>&1; docker_cmd rm "$bootstrap" >/dev/null 2>&1; fi' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    docker_cmd run -d --pull never --name "$bootstrap" --network none \
+        --mount "$mount" "$image" >/dev/null || return 1
+    bootstrap_created=1
+    for attempt in {1..60}; do
+        docker_cmd exec --user 1000:1000 -e NODE_NO_WARNINGS=1 "$bootstrap" node -e "$js" init
+        rc=$?
+        if [ "$rc" = 0 ]; then return 0; fi
+        if [ "$rc" != 75 ]; then fail "Web password initialization failed."; return "$rc"; fi
+        sleep 1
+    done
+    fail "Timed out initializing the web database. Retry start."
+    return 1
+)
+
+# Show and remove the one-time password file only after deployment succeeds.
+show_initial_web_password()
+{
+    local config="$ENV_FILE" container js
+    if [ "$1" = image ]; then config="$IMAGE_ENV_FILE"; fi
+    container="$(sed -n 's/^WEB_CONTAINER=//p' "$config")"
+    js="$(web_password_script)
+main(process.argv[1]);"
+    docker_cmd exec --user 1000:1000 -e NODE_NO_WARNINGS=1 "$container" node -e "$js" show
+}
+
+# Host-authorized password recovery: prompt twice, send via stdin and revoke old sessions.
+cmd_web_password()
+{
+    local mode="$1" container password='' confirmation='' js
+    ensure_docker --engine-only || return 1
+    if [ "$mode" = image ]; then
+        check_image_containers || return 1
+        container="$RELEASE_WEB_CONTAINER"
+    else
+        check_dev_containers || return 1
+        container="$(dev_container_name WEB_CONTAINER "$WEB_CONTAINER_NAME")"
+    fi
+    if [ "$(docker_cmd inspect --format '{{.State.Running}}' "$container" 2>/dev/null)" != true ]; then
+        fail "Start $mode mode before changing its web password."; return 1
+    fi
+    echo "Change the web admin password for $mode mode (8-128 characters)."
+    if ! IFS= read -r -s -p 'New password: ' password; then echo; return 1; fi
+    echo
+    if ! IFS= read -r -s -p 'Confirm password: ' confirmation; then echo; return 1; fi
+    echo
+    if [ "$password" != "$confirmation" ] || [ "${#password}" -lt 8 ] || [ "${#password}" -gt 128 ]; then
+        fail "Use matching passwords of 8-128 characters."; return 1
+    fi
+    js="$(web_password_script)
+main(process.argv[1]);"
+    printf '%s' "$password" | docker_cmd exec -i --user 1000:1000 -e NODE_NO_WARNINGS=1 \
+        "$container" node -e "$js" change
+}
+
+# Resolve and remember access per deployment; published and dev ports never overlap.
+resolve_web_access()
+{
+    local mode="$1" config="$ENV_FILE" saved=''
+    WEB_PORT=8001
+    if [ "$mode" = image ]; then config="$IMAGE_ENV_FILE"; WEB_PORT=8000; fi
+    if [ -f "$config" ]; then
+        saved="$(sed -n 's/^WEB_ACCESS_MODE=//p' "$config")"
+    fi
+    WEB_ACCESS_MODE="${WEB_ACCESS_REQUEST:-${saved:-public}}"
+    case "$WEB_ACCESS_MODE" in
+        public) WEB_BIND_IP=0.0.0.0 ;;
+        safe) WEB_BIND_IP=127.0.0.1 ;;
+        *) fail "Invalid saved web access mode; use start --safe or start --public."; return 2 ;;
+    esac
+}
+
+# Describe the actual host mapping without treating 0.0.0.0 as a browser URL.
+show_web_access()
+{
+    echo "Web (local): http://127.0.0.1:${WEB_PORT}"
+    if [ "$WEB_ACCESS_MODE" = public ]; then
+        echo "Web (remote): http://<server-ip>:${WEB_PORT} (sign-in required)"
+    else
+        echo "Safe mode: localhost access only."
+    fi
+}
+
+# Generate both modes from one topology; build instructions, storage and host ports differ.
 write_compose()
 {
     local mode="${1:-dev}" destination="$COMPOSE_FILE"
@@ -1735,7 +1984,7 @@ services:
       - /dev/kvm:/dev/kvm
     user: "0:0"
     ports:
-      - "127.0.0.1:8000:8000"
+      - "${WEB_BIND_IP}:${WEB_PORT}:8000"
     environment:
       TZ: Asia/Shanghai
       HOME: /data/home
@@ -1806,6 +2055,7 @@ EOF
 # Save image names and host UID/GID metadata; these values do not replace state directory backups.
 write_env()
 {
+    resolve_web_access dev || return $?
     local host_uid
     local host_gid
     local kvm_gid
@@ -1825,8 +2075,11 @@ ANDROID_IMAGE=${RUNTIME_IMAGE}
 WEB_IMAGE=android7-ws-scrcpy-web:auth-setup-v2
 ANDROID_CONTAINER=${CONTAINER_NAME}
 WEB_CONTAINER=${WEB_CONTAINER_NAME}
-ANDROID_DATA=./docker-state
-WEB_DATA=./ws-scrcpy-data
+ANDROID_DATA=./docker-state-dev
+WEB_DATA=./ws-scrcpy-data-dev
+WEB_ACCESS_MODE=${WEB_ACCESS_MODE}
+WEB_BIND_IP=${WEB_BIND_IP}
+WEB_PORT=${WEB_PORT}
 
 HOST_UID=${host_uid}
 HOST_GID=${host_gid}
@@ -1972,6 +2225,7 @@ write_manifest()
         echo "[runtime-defaults]"
         echo "container_timezone=Asia/Shanghai"
         echo "android_memory_mb=6144"
+        echo "android_default_locale=zh-Hans-CN"
         echo "emulator_version=37.1.11.0"
 
     } > "${MANIFEST_FILE}"
@@ -2017,8 +2271,13 @@ prepare_all()
 # Prepare and start both services, retaining data, then display the URL and status.
 cmd_start()
 {
+    check_migration_pending dev || return 1
+    check_dev_data_layout || return 1
+    resolve_web_access dev || return $?
     prepare_all ||
         return 1
+
+    prepare_web_password dev || return 1
 
     info "Starting Android 7 Docker cloud phone"
 
@@ -2028,7 +2287,8 @@ cmd_start()
 
     echo
     echo "Container started."
-    echo "Web display: http://localhost:8000"
+    show_web_access
+    show_initial_web_password dev || return 1
     echo
     echo "Boot progress:"
     echo
@@ -2254,6 +2514,8 @@ cmd_restart()
 # Require YES before deleting Android AVD data and starting again; web accounts are outside the deletion scope.
 cmd_reset()
 {
+    check_migration_pending dev || return 1
+    check_dev_data_layout || return 1
     hr
 
     echo "ANDROID 7 FACTORY RESET"
@@ -2482,6 +2744,7 @@ idc()
 write_image_config()
 {
     local android_image="$1" web_image="$2"
+    resolve_web_access image || return $?
     cat > "$IMAGE_ENV_FILE" <<EOF || return 1
 ANDROID_IMAGE=$android_image
 WEB_IMAGE=$web_image
@@ -2491,6 +2754,9 @@ ANDROID_DATA=android-data
 WEB_DATA=web-data
 ANDROID_VOLUME=$RELEASE_VOLUME
 WEB_VOLUME=$RELEASE_WEB_VOLUME
+WEB_ACCESS_MODE=$WEB_ACCESS_MODE
+WEB_BIND_IP=$WEB_BIND_IP
+WEB_PORT=$WEB_PORT
 EOF
     write_compose image
 }
@@ -2552,6 +2818,8 @@ check_image_containers()
 # Reuse or pull both images, verify component roles, then start the shared Compose topology.
 cmd_image_start()
 {
+    check_migration_pending image || return 1
+    resolve_web_access image || return $?
     local android_image="${1:-${RELEASE_IMAGE}}"
     local web_image="${2:-${RELEASE_WEB_IMAGE}}"
     local reference expected actual variable tag
@@ -2601,14 +2869,17 @@ cmd_image_start()
         fi
     done
     write_image_config "$android_image" "$web_image" || return 1
+    prepare_web_password image || return 1
     idc up -d --no-build --pull never || return 1
     ok "Android and web containers started."
-    echo "Web: http://127.0.0.1:8000"
+    show_web_access
+    show_initial_web_password image || return 1
 }
 
 # Reset only Android AVD state; keep web credentials and the selected image pair.
 cmd_image_reset()
 {
+    check_migration_pending image || return 1
     local answer='' android_volume web_volume android_image web_image helper users
     if [ ! -f "$IMAGE_ENV_FILE" ] || [ ! -f "$IMAGE_COMPOSE_FILE" ]; then
         fail "No image deployment configuration. Run image start first."; return 1
@@ -2664,11 +2935,26 @@ cmd_purge()
         image)
             containers=("$RELEASE_WEB_CONTAINER" "$RELEASE_CONTAINER")
             volumes=("$RELEASE_WEB_VOLUME" "$RELEASE_VOLUME")
+            if [ -f "$IMAGE_ENV_FILE" ]; then
+                volumes=("$(sed -n 's/^WEB_VOLUME=//p' "$IMAGE_ENV_FILE")"
+                    "$(sed -n 's/^ANDROID_VOLUME=//p' "$IMAGE_ENV_FILE")")
+            fi
+            for target in "${volumes[@]}"; do
+                if [[ ! "$target" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]]; then
+                    fail "Invalid image data volume: $target"; return 1
+                fi
+            done
+            if [ "${volumes[0]}" = "${volumes[1]}" ]; then
+                fail "Android/web volumes must differ."; return 1
+            fi
             ;;
         dev)
+            if [ ! -f "${BASE_DIR}/.android7-migration-dev.pending" ]; then
+                check_dev_data_layout || return 1
+            fi
             containers=("$(dev_container_name WEB_CONTAINER "$WEB_CONTAINER_NAME")"
                 "$(dev_container_name ANDROID_CONTAINER "$CONTAINER_NAME")")
-            paths=("${BASE_DIR}/docker-state" "${BASE_DIR}/ws-scrcpy-data")
+            paths=("$STATE_DIR" "$WEB_STATE_DIR")
             ;;
         *) fail "Unknown purge mode: $mode"; return 2 ;;
     esac
@@ -2741,23 +3027,191 @@ cmd_purge()
                 -ec 'find /purge-data -mindepth 1 -maxdepth 1 -exec rm -rf --one-file-system -- {} +' || return 1
         done
     fi
+    rm -f "${BASE_DIR}/.android7-migration-${mode}.pending" || return 1
     ok "${mode} containers and all Android/web runtime data removed."
-    echo "The next start creates a fresh phone and requires a new administrator password."
+    echo "The next start creates a fresh phone and prints a new random administrator password."
+}
+
+# Never boot a destination containing a partially copied Android disk or web database.
+check_migration_pending()
+{
+    if [ -f "${BASE_DIR}/.android7-migration-${1}.pending" ]; then
+        fail "An incomplete migration blocks $1 startup. Source data is unchanged."
+        echo "Inspect the destination, then use '$1 purge' to discard the partial copy before retrying."
+        return 1
+    fi
+}
+
+# Avoid silently creating an empty phone when upgrading from unsuffixed dev paths.
+check_dev_data_layout()
+{
+    local old new entries i
+    local -a old_paths=("${BASE_DIR}/docker-state" "${BASE_DIR}/ws-scrcpy-data")
+    local -a new_paths=("$STATE_DIR" "$WEB_STATE_DIR")
+    # After an explicit migration, unsuffixed directories are retained backups.
+    # Purging the new dev phone must not cause these backups to be imported again.
+    for i in 0 1; do
+        old="${old_paths[$i]}"; new="${new_paths[$i]}"
+        if [ -L "$old" ] || [ -L "$new" ]; then
+            fail "Refusing symlinked development data directories."; return 1
+        fi
+        if [ -f "${BASE_DIR}/.android7-legacy-dev-migrated" ]; then continue; fi
+        [ -d "$old" ] || continue
+        entries="$(find "$old" -mindepth 1 -maxdepth 1 -print -quit)" || return 1
+        [ -n "$entries" ] || continue
+        entries=''
+        if [ -d "$new" ]; then
+            entries="$(find "$new" -mindepth 1 -maxdepth 1 -print -quit)" || return 1
+        fi
+        if [ -z "$entries" ]; then
+            fail "Legacy dev data exists at $old. Run './android7.sh dev migrate' first."
+            return 1
+        fi
+    done
+}
+
+# Copy stopped Android/web state between independent deployments, never merging data.
+# Source mounts are read-only. A host marker blocks startup after an interrupted copy.
+cmd_data_migrate()
+{
+    local source="${1:-}" destination="${2:-}" helper='' candidate mode target users i path entries
+    local -a src=() dst=() src_types=() dst_types=() containers=() exists=(0 0)
+    if [ "$#" != 2 ] || ! [[ "$source:$destination" = image:dev ||
+        "$source:$destination" = dev:image || "$source:$destination" = legacy-dev:dev ]]; then
+        fail "Usage: ./android7.sh data migrate <image dev|dev image|legacy-dev dev>"; return 2
+    fi
+    check_migration_pending "$destination" || return 1
+    if [ "$source" != legacy-dev ]; then check_migration_pending "$source" || return 1; fi
+    if [ "$source" = dev ]; then check_dev_data_layout || return 1; fi
+    ensure_docker --engine-only || return 1
+    check_dev_containers || return 1
+    if [ "$source" != legacy-dev ]; then check_image_containers || return 1; fi
+    for candidate in "$RUNTIME_IMAGE" "$RELEASE_IMAGE" \
+        "$(sed -n 's/^ANDROID_IMAGE=//p' "$IMAGE_ENV_FILE" 2>/dev/null)"; do
+        [ -n "$candidate" ] || continue
+        if helper="$(docker_cmd image inspect --format '{{.Id}}' "$candidate" 2>/dev/null)"; then break; fi
+    done
+    if [ -z "$helper" ]; then fail "A local Android runtime image is required for migration."; return 1; fi
+    for mode in "$source" "$destination"; do
+        local -a refs=() types=()
+        case "$mode" in
+            image)
+                refs=("$RELEASE_VOLUME" "$RELEASE_WEB_VOLUME")
+                if [ -f "$IMAGE_ENV_FILE" ]; then
+                    refs=("$(sed -n 's/^ANDROID_VOLUME=//p' "$IMAGE_ENV_FILE")"
+                          "$(sed -n 's/^WEB_VOLUME=//p' "$IMAGE_ENV_FILE")")
+                fi
+                for target in "${refs[@]}"; do
+                    if [[ ! "$target" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]]; then
+                        fail "Invalid image data volume: $target"; return 1
+                    fi
+                done
+                if [ "${refs[0]}" = "${refs[1]}" ]; then fail "Android/web volumes must differ."; return 1; fi
+                types=(volume volume)
+                ;;
+            dev) refs=("$STATE_DIR" "$WEB_STATE_DIR"); types=(bind bind) ;;
+            legacy-dev) refs=("${BASE_DIR}/docker-state" "${BASE_DIR}/ws-scrcpy-data"); types=(bind bind) ;;
+        esac
+        if [ "$mode" = "$source" ]; then src=("${refs[@]}"); src_types=("${types[@]}")
+        else dst=("${refs[@]}"); dst_types=("${types[@]}"); fi
+    done
+    # Check both destinations before stopping services or writing any data.
+    for i in 0 1; do
+        for mode in source destination; do
+            local kind ref present=0
+            if [ "$mode" = source ]; then kind="${src_types[$i]}"; ref="${src[$i]}"
+            else kind="${dst_types[$i]}"; ref="${dst[$i]}"; fi
+            if [ "$kind" = bind ]; then
+                if [ -L "$ref" ] || { [ -e "$ref" ] && [ ! -d "$ref" ]; }; then
+                    fail "Refusing unexpected data path: $ref"; return 1
+                fi
+                if [ -d "$ref" ]; then present=1; fi
+            elif docker_cmd volume inspect "$ref" >/dev/null 2>&1; then present=1; fi
+            if [ "$mode" = source ]; then
+                exists[$i]=$present
+                if [ "$present" = 0 ] && [ "$source" != legacy-dev ]; then
+                    fail "Missing source data: $ref"; return 1
+                fi
+            elif [ "$present" = 1 ]; then
+                entries="$(docker_cmd run --rm --pull never --network none --user 0:0 --entrypoint /bin/sh \
+                    --mount "type=$kind,src=$ref,dst=/check,readonly" "$helper" \
+                    -ec 'find /check -mindepth 1 -maxdepth 1 -print -quit')" || return 1
+                if [ -n "$entries" ]; then fail "Destination is not empty; nothing copied: $ref"; return 1; fi
+            fi
+        done
+    done
+    if [ "${exists[*]}" = '0 0' ]; then fail "No source data found."; return 1; fi
+    info "Migrating $source -> $destination; stopping services for a consistent copy"
+    if [ "$source" != legacy-dev ]; then containers+=("$RELEASE_WEB_CONTAINER" "$RELEASE_CONTAINER"); fi
+    containers+=("$(dev_container_name WEB_CONTAINER "$WEB_CONTAINER_NAME")"
+        "$(dev_container_name ANDROID_CONTAINER "$CONTAINER_NAME")" "$WEB_CONTAINER_NAME" "$CONTAINER_NAME")
+    for target in "${containers[@]}"; do
+        if docker_cmd container inspect "$target" >/dev/null 2>&1; then
+            docker_cmd stop "$target" || return 1
+        fi
+    done
+    for target in "${src[@]}" "${dst[@]}"; do
+        users="$(docker_cmd ps -q --filter "volume=$target")" || return 1
+        if [ -n "$users" ]; then fail "A running container still uses $target; nothing copied."; return 1; fi
+    done
+    # Marker stays on failure, so a partial copy cannot be mistaken for a ready phone.
+    printf '%s -> %s\n' "$source" "$destination" > "${BASE_DIR}/.android7-migration-${destination}.pending" || return 1
+    for i in 0 1; do
+        path="${dst[$i]}"
+        if [ "${dst_types[$i]}" = bind ]; then mkdir -p "$path" || return 1
+        else docker_cmd volume create "$path" >/dev/null || return 1; fi
+        [ "${exists[$i]}" = 1 ] || continue
+        docker_cmd run --rm --pull never --network none --user 0:0 --entrypoint /bin/sh \
+            --mount "type=${src_types[$i]},src=${src[$i]},dst=/source,readonly" \
+            --mount "type=${dst_types[$i]},src=$path,dst=/destination" "$helper" \
+            -ec 'cp -a --sparse=always /source/. /destination/' || return 1
+    done
+    if [ "$destination" = dev ]; then
+        touch "${BASE_DIR}/.android7-legacy-dev-migrated" || return 1
+    fi
+    rm -f "${BASE_DIR}/.android7-migration-${destination}.pending" || return 1
+    ok "Android and web data copied; apps, accounts, permissions and sparse disks preserved."
+    echo "Source data is retained. Services remain stopped; nothing is built or published."
+    echo "Start the destination: ./android7.sh $destination start"
 }
 
 # Dispatch image operations. Both modes require Compose; deployment never builds sources.
 cmd_image()
 {
     local action="${1:-help}"
+    local WEB_ACCESS_REQUEST='' arg
+    local -a image_args=()
     if [ "$#" -gt 0 ]; then shift; fi
     if [[ "${1:-}" == -h || "${1:-}" == --help ]]; then cmd_help image; return; fi
     case "$action" in
         help|-h|--help) cmd_help image ;;
-        pull|start|build)
+        pull|start)
+            for arg in "$@"; do
+                case "$arg" in
+                    --safe|--public)
+                        if [ -n "$WEB_ACCESS_REQUEST" ]; then
+                            fail "Specify only one access option: --safe or --public."; return 2
+                        fi
+                        WEB_ACCESS_REQUEST="${arg#--}"
+                        ;;
+                    --*) fail "Unknown start option: $arg"; return 2 ;;
+                    *) image_args+=("$arg") ;;
+                esac
+            done
+            if [ "${#image_args[@]}" != 0 ] && [ "${#image_args[@]}" != 2 ]; then
+                fail "Provide both ANDROID_IMAGE and WEB_IMAGE, or neither."; return 2
+            fi
+            cmd_image_start "${image_args[@]}"
+            ;;
+        build)
             if [ "$#" != 0 ] && [ "$#" != 2 ]; then
                 fail "Provide both ANDROID_IMAGE and WEB_IMAGE, or neither."; return 2
             fi
-            if [ "$action" = build ]; then cmd_build_image "$@"; else cmd_image_start "$@"; fi
+            cmd_build_image "$@"
+            ;;
+        password)
+            if [ "$#" != 0 ]; then fail "password takes no arguments; input is hidden."; return 2; fi
+            cmd_web_password image
             ;;
         reset|purge)
             if [ "$#" != 0 ]; then fail "$action takes no extra arguments."; return 2; fi
@@ -2785,6 +3239,12 @@ cmd_image()
 # Dispatch the original two-container source-development workflow.
 cmd_dev()
 {
+    local WEB_ACCESS_REQUEST=''
+    if [ "${1:-}" = start ] && [ "$#" = 2 ]; then
+        case "$2" in
+            --safe|--public) WEB_ACCESS_REQUEST="${2#--}"; set -- start ;;
+        esac
+    fi
     if [ "$#" -gt 1 ]; then
         if [[ "${2:-}" == -h || "${2:-}" == --help ]]; then cmd_help dev; return; fi
         fail "Development commands take no extra arguments."; return 2
@@ -2802,6 +3262,8 @@ cmd_dev()
         down) cmd_down ;;
         reset) cmd_reset ;;
         purge) cmd_purge dev ;;
+        migrate) cmd_data_migrate legacy-dev dev ;;
+        password) cmd_web_password dev ;;
         log) cmd_log ;;
         status) cmd_status ;;
         help|-h|--help) cmd_help dev ;;
@@ -2825,7 +3287,8 @@ Quick start:
 Command groups:
   image                         Deploy or build the Android + web image pair
   dev                           Build and manage the source development stack
-  help [image|dev]               Show this page or detailed group help
+  data migrate SOURCE TARGET    Copy stopped data: image dev, dev image, legacy-dev dev
+  help [image|dev|data]          Show this page or detailed group help
 
 Examples:
   ./android7.sh image pull
@@ -2839,18 +3302,21 @@ Defaults:
   Web image: ${RELEASE_WEB_IMAGE}
   Containers: ${RELEASE_CONTAINER} + ${RELEASE_WEB_CONTAINER}
   Data:      ${RELEASE_VOLUME} + ${RELEASE_WEB_VOLUME}
-  Web:       http://127.0.0.1:8000
+  Web:       http://<server-ip>:8000 (image), :8001 (dev)
+  Access:    Public by default; start --safe restricts access to localhost
   Android:   7.1.1 x86_64, 6 GiB RAM, KVM
+  Language:  Simplified Chinese (China), zh-Hans-CN, for new Android data
   Timezone:  Asia/Shanghai
-  Sign-in:   Set the admin password on first visit
+  Sign-in:   Random initial admin password printed at first start
 
 Requirements: Linux x86_64, Docker Engine, Compose and /dev/kvm.
 EOF_HELP
             ;;
         image)
             cat <<EOF_HELP
-Usage: ./android7.sh image <command> [ANDROID_IMAGE WEB_IMAGE]
+Usage: ./android7.sh image <command> [--safe|--public] [ANDROID_IMAGE WEB_IMAGE]
 Provide both IMAGE:TAG arguments or neither. Deployment uses tags only.
+Access options apply only to pull/start and are saved for subsequent starts.
 
 Commands:
   pull/start        Reuse or pull both images, then start two containers
@@ -2858,6 +3324,7 @@ Commands:
   stop              Stop both containers; retain all data
   restart           Restart both containers
   down              Remove both containers/network; retain both data volumes
+  password          Change/reset the web admin password using hidden input
   reset             After YES, reset Android and restart both services; keep web accounts
   purge             After YES, remove both containers and DELETE Android/web data
   log               Follow logs from both services
@@ -2869,12 +3336,15 @@ Default images:
   $RELEASE_WEB_IMAGE
 Containers: $RELEASE_CONTAINER + $RELEASE_WEB_CONTAINER
 Volumes:    $RELEASE_VOLUME + $RELEASE_WEB_VOLUME
-Switch from dev: ./android7.sh dev down, then ./android7.sh image start.
-Both modes use port 8000; stop or remove the other deployment before starting.
+Web: http://<server-ip>:8000 (default public access; sign-in required)
+Use start --safe for localhost only, or start --public to enable remote access.
+Image uses port 8000; dev uses 8001. Both modes can run together with enough RAM.
 
 Examples:
   ./android7.sh image build
   ./android7.sh image start
+  ./android7.sh image start --safe
+  ./android7.sh image start --public
   ./android7.sh image start myrepo/phone:android myrepo/phone:web
 
 Build targets must be Docker Hub USER/REPOSITORY:TAG names you can push to.
@@ -2891,6 +3361,7 @@ EOF_HELP
         dev)
             cat <<EOF_HELP
 Usage: ./android7.sh dev <command>
+       ./android7.sh dev start [--safe|--public]
 
 Commands:
   start      Prepare sources, build and start the two development containers
@@ -2901,18 +3372,35 @@ Commands:
              web accounts and passwords are preserved
   purge      Stop/remove both containers and DELETE all Android/web data;
              requires YES; keep images/build caches; do not restart
+  password   Change/reset the web admin password using hidden input
+  migrate    Copy old unsuffixed dev directories into empty -dev directories
   log        Follow development logs
   status     Show Android, ADB, root and container diagnostics
   help       Show this page
 
 Containers: ${CONTAINER_NAME} + ${WEB_CONTAINER_NAME}
-State:      ${STATE_DIR} and ${BASE_DIR}/ws-scrcpy-data
-Web:        http://127.0.0.1:8000
+State:      ${STATE_DIR} and ${WEB_STATE_DIR}
+Web:        http://<server-ip>:8001 (default public access; sign-in required)
 
-Switch from image: ./android7.sh image down, then ./android7.sh dev start.
-Both modes use port 8000; stop or remove the other deployment before starting.
+Use start --safe for localhost only, or start --public to enable remote access.
+The access choice is saved for subsequent starts; restart keeps existing bindings.
+Image uses port 8000; dev uses 8001. Both modes can run together with enough RAM.
 Generated Docker/Compose files are overwritten by the next dev start/build.
 Edit android7.sh instead. Original flat commands remain aliases for dev commands.
+EOF_HELP
+            ;;
+        data)
+            cat <<'EOF_HELP'
+Usage: ./android7.sh data migrate SOURCE TARGET
+  image dev       Copy image volumes into dev's -dev directories
+  dev image       Copy dev's -dev directories into image volumes
+  legacy-dev dev  Upgrade old dev directories (alias: ./android7.sh dev migrate)
+
+Stops the involved containers, preserves the source, and refuses nonempty targets.
+Copies both Android and web state, including apps and login accounts/passwords.
+Does not start containers, build images, or publish. Start the destination afterwards.
+Interrupted copies block destination startup; inspect and purge the partial target
+before retrying. Old source directories remain as backups after legacy migration.
 EOF_HELP
             ;;
         *) fail "Unknown help topic: $1"; return 2 ;;
@@ -2927,6 +3415,11 @@ main()
     case "$command" in
         image) cmd_image "$@" ;;
         dev) cmd_dev "$@" ;;
+        data)
+            if [ "${1:-}" = migrate ]; then shift; cmd_data_migrate "$@"
+            elif [[ "${1:-help}" = help || "${1:-}" = --help || "${1:-}" = -h ]]; then cmd_help data
+            else fail "Unknown data command: $1"; return 2; fi
+            ;;
         help|-h|--help) cmd_help "${1:-}" ;;
         build-image) cmd_image build "$@" ;;
         start|stop|restart|down|reset|purge|log|status) cmd_dev "$command" "$@" ;;
