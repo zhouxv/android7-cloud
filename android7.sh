@@ -1112,6 +1112,12 @@ EMULATOR="${SDK_ROOT}/emulator/emulator"
 
 BOOT_TIMEOUT=360
 
+DAXIA3_PACKAGE="${DAXIA3_PACKAGE:-com.yanyu.day}"
+
+BOOT_WATCH_INTERVAL=2
+
+DAXIA3_START_DELAY=15
+
 
 export ANDROID_SDK_ROOT="${SDK_ROOT}"
 export ANDROID_HOME="${SDK_ROOT}"
@@ -1560,23 +1566,128 @@ if [ -f "${LOCALE_PENDING}" ]; then
 fi
 
 
+# Deploy and start the guest-side ADB guard. This is safe to repeat after every
+# Android reboot because /dev, including the worker lock, is recreated at boot.
+deploy_adbd_guard()
+{
+    info "Deploying ADB connection guard"
+
+    timeout -k 2 20 adb -s "${ANDROID_SERIAL}" push \
+        /opt/android/adbd-guard.sh \
+        /data/local/tmp/android7-adbd-guard.sh ||
+        return 1
+
+    timeout -k 2 20 adb -s "${ANDROID_SERIAL}" \
+        shell /system/xbin/su 0 sh -c \
+        "'mkdir -p /data/adb/service.d &&
+          cp /data/local/tmp/android7-adbd-guard.sh /data/adb/service.d/android7-adbd-guard.sh &&
+          chmod 0700 /data/adb/service.d/android7-adbd-guard.sh &&
+          /system/bin/sh /data/adb/service.d/android7-adbd-guard.sh'" ||
+        return 1
+
+    ok "ADB connection guard is running"
+}
+
+
+# Launch Daxia3 after Android finishes each boot. The app does not expose a
+# reliable BOOT_COMPLETED receiver, so the container performs the launch.
+start_daxia3()
+{
+    info "Waiting ${DAXIA3_START_DELAY}s before starting Daxia3"
+    sleep "${DAXIA3_START_DELAY}"
+
+    if ! timeout -k 1 8 adb -s "${ANDROID_SERIAL}" shell \
+        pm path "${DAXIA3_PACKAGE}" 2>/dev/null |
+        grep -q '^package:'
+    then
+        info "Daxia3 is not installed; skipping automatic launch"
+        return 0
+    fi
+
+    info "Starting Daxia3 after Android boot"
+
+    if timeout -k 2 20 adb -s "${ANDROID_SERIAL}" shell \
+        monkey \
+        -p "${DAXIA3_PACKAGE}" \
+        -c android.intent.category.LAUNCHER \
+        1 >/dev/null 2>&1
+    then
+        ok "Daxia3 started"
+        return 0
+    fi
+
+    fail "Daxia3 automatic launch failed"
+    return 1
+}
+
+
+# Read the kernel boot identifier, which changes on a real Android reboot.
+guest_boot_id()
+{
+    timeout -k 1 5 adb -s "${ANDROID_SERIAL}" shell \
+        cat /proc/sys/kernel/random/boot_id 2>/dev/null |
+        tr -d '\r\n'
+}
+
+
+# Watch the running Emulator for guest reboots. Android starts adbd during
+# boot, allowing the container to redeploy the guard before launching Daxia3.
+monitor_guest_reboots()
+{
+    local observed_boot_id current_boot_id adb_state boot
+
+    observed_boot_id="$(guest_boot_id)"
+
+    while :
+    do
+        sleep "${BOOT_WATCH_INTERVAL}"
+
+        adb_state="$(
+            timeout -k 1 3 adb devices 2>/dev/null |
+            awk -v serial="${ANDROID_SERIAL}" '$1 == serial {print $2}'
+        )"
+
+        if [ "${adb_state}" != device ]; then
+            continue
+        fi
+
+        boot="$(
+            timeout -k 1 5 adb -s "${ANDROID_SERIAL}" shell \
+                getprop sys.boot_completed 2>/dev/null |
+            tr -d '\r'
+        )"
+
+        if [ "${boot}" != 1 ]; then
+            continue
+        fi
+
+        current_boot_id="$(guest_boot_id)"
+
+        if [ -z "${current_boot_id}" ] ||
+           [ "${current_boot_id}" = "${observed_boot_id}" ]
+        then
+            continue
+        fi
+
+        observed_boot_id="${current_boot_id}"
+        info "Android reboot detected"
+
+        if ! deploy_adbd_guard; then
+            fail "Could not redeploy the ADB guard after Android reboot"
+            continue
+        fi
+
+        start_daxia3 || true
+    done
+}
+
+
+deploy_adbd_guard || exit 1
+
+
 # ============================================================
 # Magisk Manager
 # ============================================================
-
-# Install the ADB guard via AOSP su before reporting readiness.
-# Install before declaring the cloud phone ready. The worker detaches from
-# ADB so it can restore adbd even after a root app stops the transport.
-info "Installing ADB connection guard"
-
-adb -s "${ANDROID_SERIAL}" push \
-    /opt/android/adbd-guard.sh /data/local/tmp/android7-adbd-guard.sh || exit 1
-
-adb -s "${ANDROID_SERIAL}" shell /system/xbin/su 0 sh -c \
-    "'mkdir -p /data/adb/service.d &&
-      cp /data/local/tmp/android7-adbd-guard.sh /data/adb/service.d/android7-adbd-guard.sh &&
-      chmod 0700 /data/adb/service.d/android7-adbd-guard.sh &&
-      /system/bin/sh /data/adb/service.d/android7-adbd-guard.sh'" || exit 1
 
 if ! adb \
     -s "${ANDROID_SERIAL}" \
@@ -1597,6 +1708,8 @@ then
 
 fi
 
+start_daxia3 || true
+
 
 # ============================================================
 # Ready
@@ -1613,13 +1726,20 @@ ok "Android 7 cloud phone is running"
 
 
 # ============================================================
-# Tie entrypoint lifetime to the emulator and clear readiness on exit; Docker handles restart.
-# Keep PID 1 alive while Emulator is alive
+# Keep boot services healthy while tying PID 1 lifetime to the Emulator.
 # ============================================================
+
+monitor_guest_reboots &
+
+BOOT_MONITOR_PID=$!
 
 wait "${EMU_PID}"
 
 rc=$?
+
+kill "${BOOT_MONITOR_PID}" >/dev/null 2>&1 || true
+
+wait "${BOOT_MONITOR_PID}" 2>/dev/null || true
 
 rm -f "${READY_FILE}"
 
